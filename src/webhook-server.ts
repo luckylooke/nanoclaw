@@ -18,6 +18,26 @@ import type { Chat } from 'chat';
 import { getWebhookPort } from './config.js';
 import { log } from './log.js';
 
+// SEC-M1: Simple per-IP token bucket (100 req/min; refills 1 token per 600ms)
+const IP_BUCKET = new Map<string, { tokens: number; last: number }>();
+const RATE_LIMIT = 100;
+const REFILL_MS = 600;
+
+function checkRateLimit(ip: string): boolean {
+  const now = Date.now();
+  let b = IP_BUCKET.get(ip);
+  if (!b) {
+    b = { tokens: RATE_LIMIT, last: now };
+    IP_BUCKET.set(ip, b);
+  }
+  const elapsed = now - b.last;
+  b.tokens = Math.min(RATE_LIMIT, b.tokens + Math.floor(elapsed / REFILL_MS));
+  b.last = now;
+  if (b.tokens <= 0) return false;
+  b.tokens--;
+  return true;
+}
+
 interface WebhookEntry {
   chat: Chat;
   adapterName: string;
@@ -128,6 +148,16 @@ function ensureServer(): void {
   const candidate = http.createServer((req, res) => {
     res.setHeader('x-nanoclaw-webhook-id', id);
     void (async () => {
+      // Fork: per-IP rate limit. Kept when upstream reshaped this handler into a
+      // sync wrapper around an async IIFE — the guard moved inside the IIFE
+      // rather than being dropped, because checkRateLimit() merges cleanly on
+      // its own and would otherwise sit defined-but-uncalled.
+      const ip = req.socket.remoteAddress || 'unknown';
+      if (!checkRateLimit(ip)) {
+        res.writeHead(429, { 'Content-Type': 'text/plain', 'Retry-After': '60' });
+        res.end('Too Many Requests');
+        return;
+      }
       const url = req.url || '/';
 
       // Route: /webhook/{adapterName}
@@ -185,7 +215,7 @@ function ensureServer(): void {
     log.error('Webhook server error', { port, err });
   });
 
-  candidate.listen(port, '0.0.0.0', () => {
+  candidate.listen(port, process.env.WEBHOOK_HOST || '127.0.0.1', () => {
     log.info('Webhook server started', { port, adapters: [...routes.keys()] });
   });
 }
