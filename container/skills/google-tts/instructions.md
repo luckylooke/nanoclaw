@@ -5,16 +5,16 @@ description: Text-to-speech via Google Cloud TTS (Chirp 3 HD). Use when the user
 
 # Google TTS
 
-Post an audio MP3 to Slack using the `tts` tool at `/workspace/extra/tools/tts/tts.js`.
+Post an audio MP3 to Slack using the tool proxy at `/workspace/extra/tool-exec.js`.
 
 ## Commands
 
 ```bash
-# Synthesize to file only (no Slack post)
-node /workspace/extra/tools/tts/tts.js synthesize "text to speak" /tmp/output.mp3
-
 # Synthesize and post directly to a Slack channel
-node /workspace/extra/tools/tts/tts.js post "text to speak" <channel_id>
+node /workspace/extra/tool-exec.js tts post "text to speak" <channel_id>
+
+# Synthesize and post in a thread
+node /workspace/extra/tool-exec.js tts post "text to speak" <channel_id> <thread_ts>
 ```
 
 ## Rules
