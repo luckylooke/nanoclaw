@@ -137,6 +137,18 @@ export function getMessageForRetry(
     .get(messageId, status) as { id: string; tries: number; processAfter: string | null } | undefined;
 }
 
+/**
+ * Raw `content` JSON of an inbound message by id, or null. Used by the T1.3
+ * feedback index to capture the user turn that triggered an agent reply
+ * (via the outbound message's `in_reply_to`) at delivery time.
+ */
+export function getInboundContentById(db: Database.Database, messageId: string): string | null {
+  const row = db.prepare('SELECT content FROM messages_in WHERE id = ?').get(messageId) as
+    | { content: string | null }
+    | undefined;
+  return row?.content ?? null;
+}
+
 export function syncProcessingAcks(inDb: Database.Database, outDb: Database.Database): void {
   const completed = outDb
     .prepare(
@@ -212,6 +224,25 @@ export function getContainerState(outDb: Database.Database): ContainerState | nu
   } catch {
     // Table not present on older session DBs — treat as "no tool in flight".
     return null;
+  }
+}
+
+/**
+ * Latest trigger=1 message content for a session, text-extracted if the
+ * content is the `{text, ...}` JSON envelope used by channel/a2a inbound
+ * rows. Returns null if no trigger row exists. Used host-side to classify
+ * spawn complexity — see complexity-tier.ts.
+ */
+export function getLatestTriggerText(db: Database.Database): string | null {
+  const row = db.prepare(`SELECT content FROM messages_in WHERE trigger = 1 ORDER BY seq DESC LIMIT 1`).get() as
+    | { content: string }
+    | undefined;
+  if (!row) return null;
+  try {
+    const parsed = JSON.parse(row.content) as { text?: unknown };
+    return typeof parsed.text === 'string' ? parsed.text : row.content;
+  } catch {
+    return row.content;
   }
 }
 
