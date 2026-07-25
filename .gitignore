@@ -51,3 +51,6 @@ AGENTS.md
 docs/maintainer-guide.md
 docs/drafts/
 forks.md
+
+# local timestamped backups
+*.bak-*

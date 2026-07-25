@@ -288,7 +288,14 @@ export function startCredentialProxy(port: number, host = '127.0.0.1'): Promise<
                   parts.push(chunk);
                 });
                 upRes.on('end', () => {
-                  let a: UsageAcc = { input: 0, output: 0, cacheRead: 0, cacheCreate: 0, stopReason: null, resolvedModel: null };
+                  let a: UsageAcc = {
+                    input: 0,
+                    output: 0,
+                    cacheRead: 0,
+                    cacheCreate: 0,
+                    stopReason: null,
+                    resolvedModel: null,
+                  };
                   if (tooBig) {
                     log.warn('Gateway: response too large; usage not parsed', { url: req.url });
                   } else {
