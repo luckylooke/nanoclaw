@@ -163,13 +163,38 @@ export function startCredentialProxy(port: number, host = '127.0.0.1'): Promise<
         const rawTrace = req.headers['x-trace-id'];
         const traceId = (Array.isArray(rawTrace) ? rawTrace[0] : rawTrace) ?? null;
 
-        // model comes from the request body JSON.
+        // model comes from the request body JSON. Parse once; reused by the
+        // optional body-inspect spike (GATEWAY_BODY_INSPECT) below.
         let model: string | null = null;
+        let parsedBody: Record<string, unknown> | null = null;
         if (isMessages && body.length) {
           try {
-            model = JSON.parse(body.toString('utf8')).model ?? null;
+            parsedBody = JSON.parse(body.toString('utf8')) as Record<string, unknown>;
+            model = (parsedBody.model as string | undefined) ?? null;
           } catch {
             /* non-JSON body — leave model null */
+          }
+        }
+
+        // --- Tier 3 spike (#8/#9): observe request-body shape, log-only -----
+        // Confirms whether extended thinking is on (which locks temperature=1)
+        // and whether temperature/max_tokens are already set, per agent. Gated
+        // on GATEWAY_BODY_INSPECT; never mutates the forwarded body.
+        if (isMessages && parsedBody && process.env.GATEWAY_BODY_INSPECT) {
+          try {
+            const thinking = parsedBody.thinking as { type?: string; budget_tokens?: number } | undefined;
+            log.info('Gateway body-inspect', {
+              group: groupSlug,
+              model,
+              keys: Object.keys(parsedBody),
+              hasThinking: !!thinking,
+              thinkingType: thinking?.type ?? null,
+              thinkingBudget: thinking?.budget_tokens ?? null,
+              temperature: (parsedBody.temperature as number | undefined) ?? null,
+              max_tokens: (parsedBody.max_tokens as number | undefined) ?? null,
+            });
+          } catch (err) {
+            log.warn('Gateway body-inspect failed', { err: String(err) });
           }
         }
 
