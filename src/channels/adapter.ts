@@ -23,6 +23,31 @@ export interface ChannelSetup {
 
   /** Called when a user clicks a button/action in a card (e.g., ask_user_question response). */
   onAction(questionId: string, selectedOption: string, userId: string): void;
+
+  /**
+   * Called when a user adds a reaction to a message (T1.3 feedback capture).
+   * Optional: adapters that surface reactions (Slack via the Chat SDK) invoke
+   * it; the host attributes the reaction to an agent reply and logs feedback.
+   * Reaction removals are not forwarded (phase-2).
+   */
+  onReaction?(reaction: InboundReaction): void | Promise<void>;
+}
+
+/** A user reaction forwarded from an adapter to the host (T1.3). */
+export interface InboundReaction {
+  channelType: string;
+  /** Receiving adapter instance; absent means the default instance. */
+  instance?: string;
+  /** Encoded channel/platform id the reacted message lives in. */
+  channel: string;
+  /** Platform message id of the reacted message (Slack `ts`). */
+  messageTs: string;
+  /** Normalized emoji name (e.g. `thumbsup`), if the adapter provides one. */
+  emoji: string | null;
+  /** Raw platform emoji (e.g. `+1`). */
+  rawEmoji: string | null;
+  /** Platform user id of the reactor (unnamespaced, e.g. Slack `U…`). */
+  userId: string | null;
 }
 
 /** Delivery address used for reply-to overrides and (normally) the inbound's own origin. */

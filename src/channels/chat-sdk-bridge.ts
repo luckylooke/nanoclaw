@@ -19,6 +19,7 @@ import {
   type AssistantThreadStartedEvent,
   type ConcurrencyStrategy,
   type Message as ChatMessage,
+  type ReactionEvent,
 } from 'chat';
 import { log } from '../log.js';
 import { SqliteStateAdapter } from '../state-sqlite.js';
@@ -673,6 +674,25 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         }
 
         setupConfig.onAction(questionId, selectedOption, userId);
+      });
+
+      // Inbound reactions (T1.3 feedback capture). The SDK already parses the
+      // platform reaction event, verifies signatures, and drops self-reactions;
+      // the bridge is a thin forwarder — all attribution / known-user / logging
+      // logic lives host-side (feedback module). Only additions are forwarded;
+      // removals are phase-2. No-op when the host wired no onReaction handler.
+      chat.onReaction(async (event: ReactionEvent) => {
+        if (!setupConfig.onReaction || event.added === false) return;
+        const channel = adapter.channelIdFromThreadId(event.threadId);
+        await setupConfig.onReaction({
+          channelType: adapter.name,
+          instance: config.instance ?? adapter.name,
+          channel,
+          messageTs: event.messageId,
+          emoji: event.emoji?.name ?? null,
+          rawEmoji: event.rawEmoji ?? null,
+          userId: (event.user as { userId?: string } | undefined)?.userId ?? null,
+        });
       });
 
       await chat.initialize();

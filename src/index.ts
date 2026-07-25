@@ -23,9 +23,20 @@ import { enforceUpgradeTripwire } from './upgrade-state.js';
 
 // Response registry lives in response-registry.ts to break the
 // circular import cycle: src/index.ts imports src/modules/index.js for side
-// effects, and the modules call registerResponseHandler at top level — which
-// would hit a TDZ error if the array lived here.
-import { getResponseHandlers, type ResponsePayload } from './response-registry.js';
+// effects, and the modules call registerResponseHandler/onShutdown at top
+// level — which would hit a TDZ error if the arrays lived here. Re-exported
+// here so existing callers see the same surface.
+import {
+  getResponseHandlers,
+  type ResponsePayload,
+  registerResponseHandler,
+  getReactionHandlers,
+  onShutdown,
+  getShutdownCallbacks,
+  type ResponseHandler,
+} from './response-registry.js';
+export { registerResponseHandler, onShutdown };
+export type { ResponsePayload, ResponseHandler };
 
 const hostAbortController = new AbortController();
 
@@ -39,6 +50,16 @@ async function dispatchResponse(payload: ResponsePayload): Promise<void> {
     }
   }
   log.warn('Unclaimed response', { questionId: payload.questionId, value: payload.value });
+}
+
+async function dispatchReaction(reaction: InboundReaction): Promise<void> {
+  for (const handler of getReactionHandlers()) {
+    try {
+      await handler(reaction);
+    } catch (err) {
+      log.error('Reaction handler threw', { messageTs: reaction.messageTs, err });
+    }
+  }
 }
 
 // Channel barrel — each enabled channel self-registers on import.
@@ -55,7 +76,7 @@ import './cli/commands/index.js';
 import './cli/delivery-action.js';
 import { startCliServer, stopCliServer } from './cli/socket-server.js';
 
-import type { ChannelAdapter, ChannelSetup } from './channels/adapter.js';
+import type { ChannelAdapter, ChannelSetup, InboundReaction } from './channels/adapter.js';
 import {
   initChannelAdapters,
   teardownChannelAdapters,
@@ -150,6 +171,11 @@ async function main(): Promise<void> {
           threadId: null,
         }).catch((err) => {
           log.error('Failed to handle question response', { questionId, err });
+        });
+      },
+      onReaction(reaction) {
+        dispatchReaction(reaction).catch((err) => {
+          log.error('Failed to handle reaction', { messageTs: reaction.messageTs, err });
         });
       },
     };

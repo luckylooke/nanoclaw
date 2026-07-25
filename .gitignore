@@ -54,3 +54,6 @@ forks.md
 
 # local timestamped backups
 *.bak-*
+
+# stray runtime DB at repo root (real one lives in data/)
+/gateway.db

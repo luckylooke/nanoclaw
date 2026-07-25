@@ -3,6 +3,13 @@
  * SQLite reads runner-owned outbound state read-only and records delivery in
  * host-owned inbound state; other implementations preserve that ownership.
  */
+import { createHash } from 'crypto';
+import { existsSync, readFileSync } from 'fs';
+import { join } from 'path';
+
+import type Database from 'better-sqlite3';
+
+import { GROUPS_DIR } from './config.js';
 import {
   getRunningSessions,
   getActiveSessions,
@@ -21,6 +28,14 @@ import {
 import { runGuarded, type DeliveryGuardSpec, type GuardedDeliveryHandler } from './delivery-guard.js';
 import { isUnguarded, type Unguarded } from './guard/index.js';
 import { fanOutboundMessage } from './modules/cross-session-context/index.js';
+  getDueOutboundMessages,
+  getDeliveredIds,
+  getInboundContentById,
+  markDelivered,
+  markDeliveryFailed,
+  migrateDeliveredTable,
+} from './db/session-db.js';
+import { recordAgentMessage } from './gateway-db.js';
 import { log } from './log.js';
 import { normalizeOptions } from './channels/ask-question.js';
 import { clearOutbox, readOutboxFiles, withExistingMailboxSession } from './session-manager.js';
@@ -469,9 +484,94 @@ async function deliverMessage(
     fileCount: files?.length,
   });
 
+  // T1.3 — index this reply so a later reaction can attribute back to the
+  // group/session and seed eval candidates. Only real user-facing text
+  // replies (a returned platform id + non-empty text); edits, reactions,
+  // cards and ask_question cards are skipped. Best-effort — never blocks
+  // the delivery path (marking delivered must still happen).
+  if (platformMsgId && msg.channel_type && msg.platform_id) {
+    try {
+      recordReplyForFeedback(platformMsgId, msg, content, session, inDb);
+    } catch (err) {
+      log.warn('Feedback index: recordReply failed', { id: msg.id, err: String(err) });
+    }
+  }
+
   clearOutbox(session.agent_group_id, session.id, msg.id);
 
   return platformMsgId;
+}
+
+/** Best-effort text extraction from an inbound/outbound content JSON object. */
+function extractText(content: unknown): string | null {
+  if (!content || typeof content !== 'object') return null;
+  const c = content as Record<string, unknown>;
+  for (const key of ['markdown', 'text', 'content']) {
+    if (typeof c[key] === 'string' && (c[key] as string).length > 0) return c[key] as string;
+  }
+  return null;
+}
+
+/**
+ * Record a delivered agent reply into the gateway feedback index (T1.3).
+ * `content` is the already-parsed outbound message. Skips non-text payloads
+ * (edits/reactions/cards) so only genuine agent answers are indexed.
+ */
+function recordReplyForFeedback(
+  platformMsgId: string,
+  msg: { channel_type: string | null; platform_id: string | null; in_reply_to: string | null },
+  content: Record<string, unknown>,
+  session: Session,
+  inDb: Database.Database,
+): void {
+  if (content.operation === 'edit' || content.operation === 'reaction') return;
+  if (content.type === 'ask_question' || content.type === 'card') return;
+  const outputText = extractText(content);
+  if (!outputText) return; // files-only / empty — nothing worth capturing
+
+  // The triggering user turn, if this reply carries an in_reply_to link.
+  let inputText: string | null = null;
+  if (msg.in_reply_to) {
+    try {
+      const raw = getInboundContentById(inDb, msg.in_reply_to);
+      inputText = raw ? extractText(JSON.parse(raw)) : null;
+    } catch {
+      inputText = null;
+    }
+  }
+
+  const group = getAgentGroup(session.agent_group_id);
+  recordAgentMessage({
+    channel_type: msg.channel_type,
+    platform_id: msg.platform_id,
+    message_ts: platformMsgId,
+    group_slug: group?.folder ?? null,
+    session_id: session.id,
+    prompt_version: computePromptVersion(group?.folder ?? null),
+    input_text: inputText,
+    output_text: outputText,
+  });
+}
+
+/**
+ * T7 prompt_version: a stable fingerprint of the agent's identity at reply time,
+ * so a downvote (T1.3) can be tied to a concrete prompt and joined to an eval
+ * snapshot. sha256(CLAUDE.md + '\n' + CLAUDE.local.md).slice(0,16). Kept
+ * byte-identical to tools/eval/eval.js computeIdentityVersion() (which reads the
+ * same GROUPS_DIR files) so eval `identity_version` == feedback `prompt_version`.
+ * Tracks the CLAUDE.md structure + per-group CLAUDE.local (the self-mod surface);
+ * not shared-fragment content. Best-effort — never throws into delivery.
+ */
+function computePromptVersion(folder: string | null): string | null {
+  if (!folder) return null;
+  try {
+    const base = join(GROUPS_DIR, folder);
+    const readIf = (p: string): string => (existsSync(p) ? readFileSync(p, 'utf8') : '');
+    const material = readIf(join(base, 'CLAUDE.md')) + '\n' + readIf(join(base, 'CLAUDE.local.md'));
+    return createHash('sha256').update(material).digest('hex').slice(0, 16);
+  } catch {
+    return null;
+  }
 }
 
 /**

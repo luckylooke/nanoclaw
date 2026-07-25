@@ -12,6 +12,8 @@
  * import from src/index.ts, or the cycle returns.
  */
 
+import type { InboundReaction } from './channels/adapter.js';
+
 export interface ResponsePayload {
   questionId: string;
   value: string;
@@ -31,4 +33,32 @@ export function registerResponseHandler(handler: ResponseHandler): void {
 
 export function getResponseHandlers(): readonly ResponseHandler[] {
   return responseHandlers;
+}
+
+/**
+ * Inbound-reaction handlers (T1.3). Registered by the feedback module at
+ * import time; dispatched from src/index.ts's ChannelSetup.onReaction. Kept
+ * here (not index.ts) for the same TDZ reason as the response handlers above.
+ */
+export type ReactionHandler = (reaction: InboundReaction) => void | Promise<void>;
+
+const reactionHandlers: ReactionHandler[] = [];
+
+export function registerReactionHandler(handler: ReactionHandler): void {
+  reactionHandlers.push(handler);
+}
+
+export function getReactionHandlers(): readonly ReactionHandler[] {
+  return reactionHandlers;
+}
+
+type ShutdownCallback = () => void | Promise<void>;
+const shutdownCallbacks: ShutdownCallback[] = [];
+
+export function onShutdown(cb: ShutdownCallback): void {
+  shutdownCallbacks.push(cb);
+}
+
+export function getShutdownCallbacks(): readonly ShutdownCallback[] {
+  return shutdownCallbacks;
 }

@@ -6,6 +6,7 @@ const SCALAR_COLUMNS = new Set([
   'provider',
   'model',
   'effort',
+  'compact_window',
   'image_tag',
   'assistant_name',
   'max_messages_per_prompt',
@@ -81,6 +82,7 @@ export async function updateContainerConfigScalars(
       | 'provider'
       | 'model'
       | 'effort'
+      | 'compact_window'
       | 'image_tag'
       | 'assistant_name'
       | 'max_messages_per_prompt'

@@ -355,7 +355,10 @@ export function configFromDb(row: ContainerConfigRow, group: AgentGroup): Contai
  * container always sees fresh config. Returns the `ContainerConfig` for
  * use by the caller (buildMounts, composeSessionSpec, etc.).
  */
-export async function materializeContainerJson(agentGroupId: string): Promise<ContainerConfig> {
+export async function materializeContainerJson(
+  agentGroupId: string,
+  overrides?: { effort?: string },
+): Promise<ContainerConfig> {
   const group = await getAgentGroup(agentGroupId);
   if (!group) throw new Error(`Agent group not found: ${agentGroupId}`);
 
@@ -363,6 +366,13 @@ export async function materializeContainerJson(agentGroupId: string): Promise<Co
   if (!row) throw new Error(`Container config not found for agent group: ${agentGroupId}`);
 
   const config = configFromDb(row, group);
+
+  // Adaptive per-session effort — only applied when the group hasn't explicitly
+  // pinned an effort in the DB (an explicit admin pin always wins). See
+  // container-runner.ts spawnContainer().
+  if (overrides?.effort && !config.effort) {
+    config.effort = overrides.effort;
+  }
 
   const p = path.join(GROUPS_DIR, group.folder, 'container.json');
   const dir = path.dirname(p);

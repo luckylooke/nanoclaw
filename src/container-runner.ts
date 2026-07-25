@@ -24,6 +24,8 @@ import {
   TIMEZONE,
 } from './config.js';
 import { CONTAINER_PLUGINS_DIR, materializeContainerJson } from './container-config.js';
+import { classifyComplexity, tuningForTier, DEFAULT_STATIC_WINDOW } from './complexity-tier.js';
+import { getLatestTriggerText } from './db/session-db.js';
 import { getContainerConfig } from './db/container-configs.js';
 import { updateContainerConfigScalars } from './db/container-configs.js';
 import { CONTAINER_RUNTIME_BIN } from './container-runtime.js';
@@ -55,11 +57,12 @@ import {
   markContainerRunning,
   markContainerStopped,
   sessionContextPath,
+  openInboundDb,
   sessionDir,
   writeSessionContext,
   writeSessionRouting,
 } from './session-manager.js';
-import type { AgentGroup, Session } from './types.js';
+import type { AgentGroup, ContainerConfigRow, Session } from './types.js';
 
 /**
  * Docker defaults /dev/shm to 64m, which silently short-writes past that size.
@@ -173,10 +176,13 @@ async function spawnContainer(session: Session): Promise<void> {
   const mailbox = getAgentMailbox();
   writeSessionContext(agentGroup.id, session.id, await mailbox.runnerContext(mailboxKey));
 
+  const configRow = getContainerConfig(agentGroup.id);
+  const { compactWindow, effortOverride } = resolveAdaptiveTuning(agentGroup.id, session.id, configRow);
+
   // Materialize container.json from DB — writes fresh file and returns
   // the config object, threaded through provider resolution, buildMounts,
   // and buildContainerArgs so we don't re-read.
-  const containerConfig = await materializeContainerJson(agentGroup.id);
+  const containerConfig = await materializeContainerJson(agentGroup.id, { effort: effortOverride });
 
   const providerName = resolveProviderName(session.agent_provider, containerConfig.provider);
   await initGroupFilesystem(agentGroup, { provider: providerName });
