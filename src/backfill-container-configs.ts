@@ -56,6 +56,7 @@ export async function backfillContainerConfigs(): Promise<void> {
       provider,
       model: null,
       effort: null,
+      compact_window: null,
       image_tag: legacy.imageTag ?? null,
       assistant_name: legacy.assistantName ?? null,
       max_messages_per_prompt: legacy.maxMessagesPerPrompt ?? null,

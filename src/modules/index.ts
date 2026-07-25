@@ -22,6 +22,9 @@ import '../mailbox/compose.js';
 import './approvals/index.js';
 import './interactive/index.js';
 import './permissions/index.js';
+// Feedback (T1.3) loads after permissions so its known-user (member/admin)
+// helpers are bound when it registers its reaction handler at import time.
+import './feedback/index.js';
 import './agent-to-agent/index.js';
 import './self-mod/index.js';
 import './community-portal/index.js';
