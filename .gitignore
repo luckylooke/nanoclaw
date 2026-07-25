@@ -56,3 +56,6 @@ docs/maintainer-guide.md
 docs/drafts/
 forks.md
 .worktrees/
+
+# local timestamped backups
+*.bak-*
