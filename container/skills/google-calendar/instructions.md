@@ -27,6 +27,11 @@ node /workspace/extra/tools/gcal/gcal.js update <eventId> '{"summary":"New title
 
 # Delete an event
 node /workspace/extra/tools/gcal/gcal.js delete <eventId>
+
+# NOTE: delete is a guarded destructive action. The first `delete` call returns
+# {"requires_confirmation":true, "dry_run": <the event>, "confirm_token": "..."} and does
+# NOT delete. Show the user the event from dry_run, get their OK, then re-run WITH the token:
+#   node /workspace/extra/tools/gcal/gcal.js delete <eventId> --confirm <confirm_token>
 ```
 
 ## Rules
