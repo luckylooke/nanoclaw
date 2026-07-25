@@ -46,12 +46,14 @@ node /workspace/extra/tool-exec.js rag search "what about the cost?" --rewrite -
 
 The response echoes `rewritten_query` so you can see what was actually searched. One small Haiku call (billed to your budget); skip it when your query already stands on its own.
 
-## How to use results — strict rules
+## How to use results — the anti-hallucination contract (strict)
 
-- **Cite, never paraphrase as your own fact.** Attribute every claim: quote + source (author) + page.
-- **Confidence gate.** If the top result's `confidence` is low (roughly `< 0.4`) or `results` is empty, respond: *"not found in current knowledge base"* — do **not** invent an answer.
-- **Never fabricate.** State only what the returned quotes support. If the sources don't cover it, say so plainly.
-- **Flag contradictions.** If a proposed design conflicts with an indexed source, surface the conflict explicitly with the citation, then suggest the source-backed alternative.
+Every claim you make from the knowledge base must be **traceable to a retrieved quote**. Rule of thumb: *an authoritative-sounding claim with no citation is a bug* — a reader (or an eval) can spot an unsupported answer purely by its missing citation.
+
+- **Cite every source-backed claim inline** — quote + source (author) + **page** — right where you make the claim. Never paraphrase indexed text as your own fact.
+- **Confidence gate / miss.** If the top result's `confidence` is low (roughly `< 0.4`) or `results` is empty, say plainly **"not in the knowledge base"** *first*. You may then add your own reasoning, but you MUST label it "my own reasoning, not source-backed".
+- **Never fabricate a citation.** Do not invent a source, page, or quote, and never dress up your own general knowledge as if it came from the index. State only what the returned quotes actually support.
+- **Flag contradictions.** If a proposed design conflicts with an indexed source, surface the conflict with the citation, then suggest the source-backed alternative.
 - On architecture / design decisions, search the knowledge base **first**, then reason with what it returns.
 
 ## Admin (host-side only — not runnable from inside the container)
