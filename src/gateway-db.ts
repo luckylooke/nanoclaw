@@ -192,9 +192,7 @@ export function initGatewayDb(): void {
          @prompt_version, @input_text, @output_text)
     `);
     // Most-recent match wins if a ts somehow recurs (it shouldn't for Slack).
-    _agentMsgLookupStmt = _gw.prepare(
-      'SELECT * FROM agent_messages WHERE message_ts = ? ORDER BY id DESC LIMIT 1',
-    );
+    _agentMsgLookupStmt = _gw.prepare('SELECT * FROM agent_messages WHERE message_ts = ? ORDER BY id DESC LIMIT 1');
     _feedbackInsertStmt = _gw.prepare(`
       INSERT INTO feedback
         (ts, group_slug, session_id, message_ts, channel, signal, kind, prompt_version, note)
