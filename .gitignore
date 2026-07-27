@@ -55,5 +55,8 @@ forks.md
 # local timestamped backups
 *.bak-*
 
-# stray runtime DB at repo root (real one lives in data/)
+# stray runtime DBs at repo root (the real ones live in data/ — these get created
+# empty when a tool is run with the repo root as cwd)
 /gateway.db
+/nanoclaw.db
+/outbound.db
