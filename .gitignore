@@ -62,3 +62,8 @@ forks.md
 
 # stray runtime DB at repo root (real one lives in data/)
 /gateway.db
+
+# stray runtime DBs at repo root (the real ones live in data/ — these get created
+# empty when a tool is run with the repo root as cwd)
+/nanoclaw.db
+/outbound.db
