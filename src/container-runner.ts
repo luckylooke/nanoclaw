@@ -21,6 +21,7 @@ import {
   DATA_DIR,
   GROUPS_DIR,
   INSTALL_SLUG,
+  OTEL_COLLECTOR_PORT,
   TIMEZONE,
 } from './config.js';
 import { CONTAINER_PLUGINS_DIR, materializeContainerJson } from './container-config.js';

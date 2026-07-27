@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -460,6 +461,44 @@ const CLAUDE_CODE_AUTO_COMPACT_WINDOW = process.env.CLAUDE_CODE_AUTO_COMPACT_WIN
  */
 const STALE_SESSION_RE = /no conversation found|ENOENT.*\.jsonl|session.*not found/i;
 
+// ── Per-turn tracing ──
+//
+// One trace id per query() — i.e. per agent turn — shared by two channels so
+// the cost row and the execution detail describe the same unit of work:
+//
+//   1. `x-trace-id` appended to ANTHROPIC_CUSTOM_HEADERS. Claude Code attaches
+//      it to every Anthropic request; the credential proxy reads it into
+//      gateway.db `api_calls.trace_id` and strips it before forwarding upstream.
+//   2. `TRACEPARENT` (W3C). In Agent SDK / headless mode Claude Code adopts an
+//      inbound trace context as the parent of its own interaction span, so the
+//      OTel spans it exports carry this same trace id.
+//
+// The id is therefore deliberately in OTel's wire format (32 lowercase hex) so
+// `api_calls.trace_id` joins `otel.db spans.trace_id` with no translation.
+function newTraceId(): string {
+  return crypto.randomBytes(16).toString('hex');
+}
+function newSpanId(): string {
+  return crypto.randomBytes(8).toString('hex');
+}
+
+/**
+ * Merge the per-turn trace id into the env handed to this query's Claude Code
+ * process. `ANTHROPIC_CUSTOM_HEADERS` already carries `x-agent-group` from the
+ * container launcher (docker -e); we must preserve it — Claude Code reads the
+ * variable whole, so replacing it would silently drop per-agent cost
+ * attribution and un-cap the budget for that agent.
+ */
+function traceEnv(traceId: string): Record<string, string> {
+  const existing = process.env.ANTHROPIC_CUSTOM_HEADERS?.trim();
+  const headerLines = existing ? [existing] : [];
+  headerLines.push(`x-trace-id: ${traceId}`);
+  return {
+    ANTHROPIC_CUSTOM_HEADERS: headerLines.join('\n'),
+    TRACEPARENT: `00-${traceId}-${newSpanId()}-01`,
+  };
+}
+
 export class ClaudeProvider implements AgentProvider {
   readonly supportsNativeSlashCommands = true;
   /**
@@ -553,6 +592,11 @@ export class ClaudeProvider implements AgentProvider {
 
     const instructions = input.systemContext?.instructions;
 
+    // One trace id per turn, logged so a container log line can be tied back to
+    // the gateway row and the OTel spans for the same turn.
+    const traceId = newTraceId();
+    log(`trace ${traceId}`);
+
     const sdkResult = sdkQuery({
       prompt: stream,
       options: {
@@ -565,7 +609,7 @@ export class ClaudeProvider implements AgentProvider {
           : undefined,
         allowedTools: [...TOOL_ALLOWLIST, ...Object.keys(this.mcpServers).map(mcpAllowPattern)],
         disallowedTools: SDK_DISALLOWED_TOOLS,
-        env: this.env,
+        env: { ...this.env, ...traceEnv(traceId) },
         model: this.model,
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         effort: this.effort as any,

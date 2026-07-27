@@ -208,8 +208,12 @@ export function startCredentialProxy(port: number, host = '127.0.0.1'): Promise<
         delete headers['connection'];
         delete headers['keep-alive'];
         delete headers['transfer-encoding'];
-        // Gateway attribution header is host-side only — never send upstream.
+        // Gateway attribution + tracing headers are host-side only — never send
+        // upstream. `x-trace-id` is the per-turn correlation id injected by the
+        // container's claude provider (also carried as TRACEPARENT, so the same
+        // id appears on the OTel spans for this turn).
         delete headers['x-agent-group'];
+        delete headers['x-trace-id'];
 
         if (authMode === 'api-key') {
           // API key mode: inject x-api-key on every request

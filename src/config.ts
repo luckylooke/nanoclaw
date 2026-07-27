@@ -87,6 +87,13 @@ export const CONTAINER_MAX_OUTPUT_SIZE = parseInt(process.env.CONTAINER_MAX_OUTP
 // bridge differs (e.g. rootless Docker → set CREDENTIAL_PROXY_HOST=0.0.0.0).
 export const CREDENTIAL_PROXY_PORT = parseInt(process.env.CREDENTIAL_PROXY_PORT || '3002', 10);
 export const CREDENTIAL_PROXY_HOST = process.env.CREDENTIAL_PROXY_HOST || '172.17.0.1';
+
+// Host-side OTLP collector (agent-system/tools/otel/collector.js). Same
+// reachability model as the credential proxy: bound on the docker bridge,
+// containers reach it via host.docker.internal. 4318 is the OTLP/HTTP default.
+// The collector is a separate systemd service, not started by nanoclaw — this
+// constant only tells containers where to export to.
+export const OTEL_COLLECTOR_PORT = parseInt(process.env.OTEL_COLLECTOR_PORT || '4318', 10);
 export const MAX_MESSAGES_PER_PROMPT = Math.max(1, parseInt(process.env.MAX_MESSAGES_PER_PROMPT || '10', 10) || 10);
 export const IDLE_TIMEOUT = parseInt(process.env.IDLE_TIMEOUT || '1800000', 10); // 30min default — how long to keep container alive after last result
 export const MAX_CONCURRENT_CONTAINERS = Math.max(1, parseInt(process.env.MAX_CONCURRENT_CONTAINERS || '5', 10) || 5);
