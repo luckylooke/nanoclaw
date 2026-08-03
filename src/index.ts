@@ -5,7 +5,10 @@
  * start delivery polls, start sweep, handle shutdown.
  */
 import { backfillContainerConfigs } from './backfill-container-configs.js';
-import { CENTRAL_DB_PATH } from './config.js';
+import { CENTRAL_DB_PATH, DATA_DIR, CREDENTIAL_PROXY_PORT, CREDENTIAL_PROXY_HOST } from './config.js';
+import { type Server } from 'http';
+import { startCredentialProxy } from './credential-proxy.js';
+import path from 'path';
 import { enforceStartupBackoff, resetCircuitBreaker } from './circuit-breaker.js';
 import { adoptRunningSessions } from './container-runner.js';
 import { closeDb, initDb } from './db/connection.js';
@@ -59,6 +62,9 @@ import {
   createChannelDeliveryAdapter,
 } from './channels/channel-registry.js';
 
+// Native credential proxy server handle — closed on graceful shutdown.
+let credentialProxyServer: Server | undefined;
+
 async function main(): Promise<void> {
   log.info('NanoClaw starting');
 
@@ -84,6 +90,12 @@ async function main(): Promise<void> {
   // is still running keeps running, and only true orphans are stopped.
   await getSessionDriver().ensureReady?.();
   await adoptRunningSessions();
+
+  // 2b. Native credential proxy — injects the real Anthropic credential on
+  // the wire so per-agent containers never see it. Must be listening before
+  // any container spawns (channel adapters / sweep can trigger a spawn).
+  // Replaces the OneCLI gateway.
+  credentialProxyServer = await startCredentialProxy(CREDENTIAL_PROXY_PORT, CREDENTIAL_PROXY_HOST);
 
   // 3. Channel adapters
   await initChannelAdapters((adapter: ChannelAdapter): ChannelSetup => {
@@ -175,6 +187,7 @@ async function shutdown(signal: string): Promise<void> {
   await stopHostModules();
   stopDeliveryPolls();
   stopHostSweep();
+  credentialProxyServer?.close();
   await stopCliServer();
   try {
     await teardownChannelAdapters();

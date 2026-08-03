@@ -1,16 +1,10 @@
 /**
  * Handle an admin's response to an approval card.
  *
- * Two categories of pending_approvals rows exist:
- *   1. Module-initiated actions — the module called `requestApproval()` with
- *      some free-form `action` string and registered a handler via
- *      `registerApprovalHandler(action, handler)`. On approve, we look up the
- *      handler and call it; on plain reject we relay a decline to the agent; on
- *      "Reject with reason…" we hold the row and capture the admin's next DM as
- *      a one-line reason (see reason-capture.ts). Reject finalization is shared
- *      via finalizeReject.
- *   2. OneCLI credential approvals (`action = 'onecli_credential'`). Resolved
- *      via an in-memory Promise — see onecli-approvals.ts.
+ * Module-initiated actions: the module called `requestApproval()` with some
+ * free-form `action` string and registered a handler via
+ * `registerApprovalHandler(action, handler)`. On approve, we look up the
+ * handler and call it; on reject, we notify the agent and move on.
  *
  * The response handler is registered via core's `registerResponseHandler`;
  * core iterates handlers and the first one to return `true` claims the response.
@@ -28,7 +22,6 @@ import { writeSessionMessage } from '../../session-manager.js';
 import type { PendingApproval } from '../../types.js';
 import { hasAdminPrivilege, isGlobalAdmin, isOwner } from '../permissions/db/user-roles.js';
 import { finalizeReject } from './finalize.js';
-import { ONECLI_ACTION, resolveOneCLIApproval } from './onecli-approvals.js';
 import { getApprovalHandler, notifyApprovalResolved, REJECT_WITH_REASON_VALUE } from './primitive.js';
 import { armReasonCapture } from './reason-capture.js';
 
@@ -43,16 +36,6 @@ export async function handleApprovalsResponse(payload: ResponsePayload): Promise
       userId: payload.userId,
       channelType: payload.channelType,
     });
-    return true;
-  }
-
-  if (approval.action === ONECLI_ACTION) {
-    if (await resolveOneCLIApproval(payload.questionId, payload.value)) {
-      return true;
-    }
-    // Row exists but the in-memory resolver is gone (timer fired or the process
-    // was in a weird state). Nothing to do — just drop the row.
-    await deletePendingApproval(payload.questionId);
     return true;
   }
 

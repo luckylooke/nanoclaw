@@ -23,7 +23,10 @@ import {
 // Side-effect import: the barrel overlays append their registration to.
 import './installed.js';
 
-const DEFAULT_GATEWAY_PROVIDER_KIND = 'onecli';
+// Fork default: the native credential proxy, not upstream's OneCLI. An install
+// that never sets NANOCLAW_GATEWAY_PROVIDER must not quietly fall back to
+// putting a third party on the credential path — that is the fork's whole point.
+const DEFAULT_GATEWAY_PROVIDER_KIND = 'credential-proxy';
 
 export function configuredGatewayProviderKind(env: NodeJS.ProcessEnv = process.env): GatewayProviderKind {
   const configured =
