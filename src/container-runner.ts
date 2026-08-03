@@ -875,8 +875,8 @@ function selectedSkillNames(containerConfig: import('./container-config.js').Con
 }
 
 // SEC-M8: validate package names to prevent shell injection via DB-sourced values.
-const APT_PKG_RE  = /^[a-z0-9][a-z0-9_.+:-]*$/;
-const NPM_PKG_RE  = /^(?:@[a-z0-9_-]+\/)?[a-z0-9][a-z0-9_.+-]*(?:@[a-z0-9._~^<>=*|-]+)?$/;
+const APT_PKG_RE = /^[a-z0-9][a-z0-9_.+:-]*$/;
+const NPM_PKG_RE = /^(?:@[a-z0-9_-]+\/)?[a-z0-9][a-z0-9_.+-]*(?:@[a-z0-9._~^<>=*|-]+)?$/;
 
 function assertSafePackages(apt: string[], npm: string[]): void {
   for (const p of apt) {
