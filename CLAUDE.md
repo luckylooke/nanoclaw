@@ -162,7 +162,7 @@ The `on_wake` column on `messages_in` ensures wake messages are only picked up b
 
 Key files: `src/container-restart.ts`, `src/container-runner.ts` (`killContainer`), `container/agent-runner/src/db/messages-in.ts` (`getPendingMessages`).
 
-## Secrets / Credentials / Gateways
+## Secrets / Credentials / Native Proxy
 
 API keys, OAuth tokens, and auth credentials are managed by a **credential gateway** — never by NanoClaw and never by an agent. Secrets are injected at the network boundary at request time; none are passed in env vars or through chat context.
 
@@ -171,6 +171,20 @@ NanoClaw ships the seam, not a gateway. One gateway is installed per copy from i
 The container agent learns the gateway's behavior from that gateway's own container skill, which the install copies into `container/skills/`. Only the selected gateway's skills reach an agent, so a container is never told about a proxy it is not behind.
 
 **Read [docs/gateway-seam.md](docs/gateway-seam.md) before touching any of this.** It covers the provider contract, what core owns versus what a provider owns, the availability model, and the `gateway-trust` mount class. Operational detail for a specific gateway — vault modes, approval policy, dashboards — lives in that gateway's skill, not here.
+
+All other secrets (GCP_SA_KEY, GOOGLE_OAUTH_TOKEN, etc.) are injected by a host daemon. Containers never see raw key values.
+
+- `~/tool-proxy/daemon.js` — HTTP daemon on `172.17.0.1:7700`
+- `~/tool-proxy/tool-exec.js` — thin client mounted into containers at `/workspace/extra/tool-exec.js`
+- `tool-proxy.service` — systemd user service (enabled, `Restart=always`)
+- Vault: `~/.agent-secrets/secrets.json` (host only, mode 600)
+
+**Container usage:**
+```bash
+onecli agents list                                          # check secretMode
+onecli agents set-secret-mode --id <agent-id> --mode all    # inject all matching secrets
+onecli agents set-secrets --id <agent-id> --secret-ids ...  # or stay selective, assign specific ones
+```
 
 ### Approvals
 
