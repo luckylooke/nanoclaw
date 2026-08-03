@@ -127,7 +127,7 @@ export function getContainerStartedAtMs(sessionId: string): number | undefined {
  * (the in-flight wake promise is reused).
  *
  * Contract: never throws. Returns `true` on successful spawn, `false` on
- * transient spawn failure (e.g. OneCLI gateway unreachable). Callers don't
+ * transient spawn failure (e.g. credential proxy unreachable). Callers don't
  * need to wrap — the inbound row stays pending and host-sweep retries on its
  * next tick.
  */

@@ -65,8 +65,8 @@ For ad-hoc central queries from skills or scripts, use the in-tree wrapper rathe
 | `src/delivery-guard.ts` | `DeliveryGuardSpec` + `runGuarded` — the guard-consult pipeline for privileged delivery actions (registry stays in `delivery.ts`) |
 | `src/host-sweep.ts` | 60s sweep: `processing_ack` sync, stale detection, due-message wake, recurrence |
 | `src/session-manager.ts` | Resolves sessions; opens `inbound.db` / `outbound.db`; manages heartbeat path |
-| `src/container-runner.ts` | Spawns per-agent-group Docker containers with session DB + outbox mounts, OneCLI `ensureAgent` |
-| `src/container-runtime.ts` | Docker CLI wrapper (runtime binary, host-gateway args, mount args), orphan cleanup |
+| `src/container-runner.ts` | Spawns per-agent-group Docker containers with session DB + outbox mounts |
+| `src/container-runtime.ts` | Runtime selection (Docker vs Apple containers), orphan cleanup |
 | `src/guard/` | Privileged-action decision seam: `guard(action, input)` → allow \| hold \| deny. Module-edge `guard.ts` adapters (cli, agent-to-agent, self-mod, permissions) define each action's decision; ncl commands + delivery actions demand a guard at registration; approved replays carry the approval row as a grant and re-run the checks. Conformance test: `src/guard/conformance.test.ts` |
 | `src/modules/permissions/access.ts` | `canAccessAgentGroup` — owner / global admin / scoped admin / member resolution against `user_roles` + `agent_group_members` |
 | `src/modules/approvals/primitive.ts` | `pickApprover`, `pickApprovalDelivery`, `requestApproval`, approval-handler registry |
@@ -82,8 +82,8 @@ For ad-hoc central queries from skills or scripts, use the in-tree wrapper rathe
 | `src/channels/channel-defaults.ts` | Wiring-creation helpers over adapter-declared channel defaults (`resolveWiringDefaults`, `resolveThreadPolicy`, engage validation) |
 | `src/providers/` | Host-side provider container-config (`claude` baked in; `opencode` etc. installed from the `providers` branch) |
 | `container/agent-runner/src/` | Agent-runner: poll loop, formatter, provider abstraction, MCP tools, destinations |
-| `container/skills/` | Container skills mounted into every agent session (`agent-browser`, `frontend-engineer`, `onecli-gateway`, `self-customize`, `welcome`; opt-in skills like `vercel-cli`, `slack-formatting` and `whatsapp-formatting` install with the `/add-*` skill that adds their capability) |
-| `groups/<folder>/` | Per-agent-group filesystem (CLAUDE.md, skills) — agent-runner source is a shared read-only mount, not copied per group |
+| `container/skills/` | Container skills mounted into every agent session (`welcome`, `self-customize`, `agent-browser`, `slack-formatting`) |
+| `groups/<folder>/` | Per-agent-group filesystem (CLAUDE.md, skills, per-group `agent-runner-src/` overlay) |
 | `scripts/init-first-agent.ts` | Bootstrap the first DM-wired agent (used by `/init-first-agent` skill) |
 | `scripts/skill-apply.ts` | Deterministic SKILL.md applier — executes `nc:` directive fences; declare/emit core, journaled + idempotent |
 | `scripts/skill-directives.ts` + `scripts/skill-policy.ts` | `nc:` grammar parser + lint; UI-free driver policy derived from document structure (gate confirm, URL offer) |
@@ -159,7 +159,7 @@ The `on_wake` column on `messages_in` ensures wake messages are only picked up b
 
 Key files: `src/container-restart.ts`, `src/container-runner.ts` (`killContainer`), `container/agent-runner/src/db/messages-in.ts` (`getPendingMessages`).
 
-## Secrets / Credentials / OneCLI
+## Secrets / Credentials / Native Proxy
 
 API keys, OAuth tokens, and auth credentials are managed by the OneCLI gateway. Secrets are injected into per-agent containers at request time — none are passed in env vars or through chat context. The container agent sees this via the `onecli-gateway` container skill (`container/skills/onecli-gateway/SKILL.md`), which teaches it how the proxy works, how to handle auth errors, and to never ask for raw credentials. Host-side wiring: `src/modules/approvals/onecli-approvals.ts`, `ensureAgent()` in `container-runner.ts`. Run `onecli --help`.
 
@@ -167,6 +167,14 @@ API keys, OAuth tokens, and auth credentials are managed by the OneCLI gateway. 
 
 Auto-created agents default to `all` secret mode — every vault secret whose host pattern matches is injected automatically, so the common case needs no per-agent setup. If an agent is in `selective` mode it gets no secrets until you assign them, which shows up as a `401` from an API whose credential *is* in the vault. The SDK can't change this; use the CLI (or the web UI at `http://127.0.0.1:10254`):
 
+All other secrets (GCP_SA_KEY, GOOGLE_OAUTH_TOKEN, etc.) are injected by a host daemon. Containers never see raw key values.
+
+- `~/tool-proxy/daemon.js` — HTTP daemon on `172.17.0.1:7700`
+- `~/tool-proxy/tool-exec.js` — thin client mounted into containers at `/workspace/extra/tool-exec.js`
+- `tool-proxy.service` — systemd user service (enabled, `Restart=always`)
+- Vault: `~/.agent-secrets/secrets.json` (host only, mode 600)
+
+**Container usage:**
 ```bash
 onecli agents list                                          # check secretMode
 onecli agents set-secret-mode --id <agent-id> --mode all    # inject all matching secrets
@@ -255,7 +263,7 @@ Check these first when something goes wrong:
 | What | Where |
 |------|-------|
 | Host logs | `logs/nanoclaw.error.log` first (delivery failures, crash-loop backoff, warnings), then `logs/nanoclaw.log` for the full routing chain |
-| Setup logs | `logs/setup.log` (overall), `logs/setup-steps/*.log` (per-step: bootstrap, environment, container, onecli, mounts, service, etc.) |
+| Setup logs | `logs/setup.log` (overall), `logs/setup-steps/*.log` (per-step: bootstrap, environment, container, mounts, service, etc.) |
 | Session DBs | `data/v2-sessions/<agent-group>/<session>/` — `inbound.db` (`messages_in`: did the message reach the container?), `outbound.db` (`messages_out`: did the agent produce a response?) |
 
 Note: container logs are lost after the container exits (`--rm` flag). If the agent silently failed inside the container, there's no persistent log to inspect.
