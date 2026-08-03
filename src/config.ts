@@ -93,6 +93,19 @@ export const CONTAINER_INSTALL_LABEL = `nanoclaw-install=${INSTALL_SLUG}`;
 // Operators opt in: CONTAINER_CPU_LIMIT=2, CONTAINER_MEMORY_LIMIT=8g.
 export const CONTAINER_CPU_LIMIT = process.env.CONTAINER_CPU_LIMIT || envConfig.CONTAINER_CPU_LIMIT || '';
 export const CONTAINER_MEMORY_LIMIT = process.env.CONTAINER_MEMORY_LIMIT || envConfig.CONTAINER_MEMORY_LIMIT || '';
+export const CONTAINER_TIMEOUT = parseInt(process.env.CONTAINER_TIMEOUT || '1800000', 10);
+export const CONTAINER_MAX_OUTPUT_SIZE = parseInt(process.env.CONTAINER_MAX_OUTPUT_SIZE || '10485760', 10); // 10MB default
+// Native credential proxy — replaces the OneCLI gateway. Containers reach it
+// via host.docker.internal (host-gateway → docker bridge IP on Linux). Port
+// 3002 chosen because 3000 (nanoclaw webhook) and 3001 (github-webhook) are
+// taken on this host. Bind on the docker bridge IP so the proxy is reachable
+// by containers but stays off the public interface; override via env if the
+// bridge differs (e.g. rootless Docker → set CREDENTIAL_PROXY_HOST=0.0.0.0).
+export const CREDENTIAL_PROXY_PORT = parseInt(process.env.CREDENTIAL_PROXY_PORT || '3002', 10);
+export const CREDENTIAL_PROXY_HOST = process.env.CREDENTIAL_PROXY_HOST || '172.17.0.1';
+export const MAX_MESSAGES_PER_PROMPT = Math.max(1, parseInt(process.env.MAX_MESSAGES_PER_PROMPT || '10', 10) || 10);
+export const IDLE_TIMEOUT = parseInt(process.env.IDLE_TIMEOUT || '1800000', 10); // 30min default — how long to keep container alive after last result
+export const MAX_CONCURRENT_CONTAINERS = Math.max(1, parseInt(process.env.MAX_CONCURRENT_CONTAINERS || '5', 10) || 5);
 
 // Fork-bomb backstop. cgroups v2 counts THREADS, not processes, and Chromium is
 // thread-hungry — a browsing agent with several tabs open runs into the high
