@@ -874,6 +874,19 @@ function selectedSkillNames(containerConfig: import('./container-config.js').Con
     : [];
 }
 
+// SEC-M8: validate package names to prevent shell injection via DB-sourced values.
+const APT_PKG_RE  = /^[a-z0-9][a-z0-9_.+:-]*$/;
+const NPM_PKG_RE  = /^(?:@[a-z0-9_-]+\/)?[a-z0-9][a-z0-9_.+-]*(?:@[a-z0-9._~^<>=*|-]+)?$/;
+
+function assertSafePackages(apt: string[], npm: string[]): void {
+  for (const p of apt) {
+    if (!APT_PKG_RE.test(p)) throw new Error('Invalid apt package name rejected: ' + JSON.stringify(p));
+  }
+  for (const p of npm) {
+    if (!NPM_PKG_RE.test(p)) throw new Error('Invalid npm package name rejected: ' + JSON.stringify(p));
+  }
+}
+
 const execAsync = promisify(exec);
 
 /** Build a per-agent-group Docker image with custom packages. */
@@ -888,6 +901,7 @@ export async function buildAgentGroupImage(agentGroupId: string): Promise<void> 
   if (aptPackages.length === 0 && npmPackages.length === 0) {
     throw new Error('No packages to install. Use install_packages first.');
   }
+  assertSafePackages(aptPackages, npmPackages);
 
   // Image building is not on the runtime path (drivers never build) and shells
   // the local Docker daemon. Both call sites gate on the `imageBuild`
