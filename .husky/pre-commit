@@ -3,3 +3,19 @@ pnpm run format:fix
 if [ -n "$staged" ]; then
   echo "$staged" | xargs git add
 fi
+
+# Parse-gate BOTH shipped trees before anything can be committed.
+#
+# format:fix above only ever touched src/**, which is how a missing `}` in
+# container/agent-runner/src/poll-loop.ts sailed through on 2026-08-03 and
+# killed every agent container for three days. That directory is bind-mounted
+# read-only at /app/src, so a syntax error there is in production the moment
+# it is written — there is no build step to catch it.
+#
+# Syntax only, so it stays fast and cannot fail for formatting or type reasons.
+if ! node scripts/check-syntax.cjs; then
+  echo ''
+  echo 'pre-commit: BLOCKED — the code above does not parse.'
+  echo 'Fix it before committing. To bypass in a genuine emergency: git commit --no-verify'
+  exit 1
+fi
