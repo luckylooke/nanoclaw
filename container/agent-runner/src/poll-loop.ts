@@ -1131,6 +1131,7 @@ export async function autoAppendTaskLog(text: string): Promise<void> {
     content: JSON.stringify({ text: line }),
   });
   log('Task run log auto-appended from final text');
+}
 
 async function sendToDestination(dest: DestinationEntry, body: string, routing: RoutingContext): Promise<void> {
   const platformId = dest.type === 'channel' ? dest.platformId! : dest.agentGroupId!;
