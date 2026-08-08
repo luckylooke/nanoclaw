@@ -136,9 +136,7 @@ describe('composeGroupClaudeMd memory imports', () => {
     // shared base and every fragment — prompt caching is a prefix match, and
     // anything before the volatile tail stays cacheable.
     expect(imports.at(-1)).toBe('@./memory/index.md');
-    expect(imports.indexOf('@./.claude-shared.md')).toBeLessThan(
-      imports.indexOf('@./memory/index.md'),
-    );
+    expect(imports.indexOf('@./.claude-shared.md')).toBeLessThan(imports.indexOf('@./memory/index.md'));
   });
 
   it('does NOT import the format contract — the index links to it instead', () => {
