@@ -24,5 +24,15 @@ node /workspace/extra/tool-exec.js diff pr https://github.com/owner/repo/pull/5 
 ## Rules
 
 - The output includes: PR title, author, +additions/−deletions, file count, and the raw diff (truncated at ~2800 chars with a note if cut).
-- Use the channel ID for the relevant dev channel: #agent-dev-game or #agent-dev-web.
+- Post to the dev channel that matches the repo. The IDs are here so you never have to go looking:
+
+  | channel | id |
+  |---|---|
+  | `#agent-dev-game` | `C0B69CU8PGA` |
+  | `#agent-dev-web` | `C0B69CZRS9Y` |
+
+  For any other channel, the authoritative source is `messaging_groups` in
+  `~/nanoclaw/data/v2.db` (note: `data/`, not the empty `~/nanoclaw/nanoclaw.db`),
+  reachable via `ncl messaging-groups list`. Do not grep logs or the filesystem for
+  a channel id.
 - Requires GITHUB_TOKEN to be set in secrets (works for both public and private repos).
