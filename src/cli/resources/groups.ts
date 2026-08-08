@@ -1,5 +1,7 @@
 import { connectGatewayAccount } from '../../gateway-connections.js';
 import { randomUUID } from 'crypto';
+import fs from 'fs';
+import path from 'path';
 
 import {
   mcpServerPluginOwner,
@@ -401,6 +403,7 @@ registerResource({
       description:
         'Update container config scalar fields. Changes are saved but do NOT take effect until you run `ncl groups restart`. ' +
         'Use --id <group-id> and any of: --provider, --model, --effort, --speed, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, ' +
+        '--skills ("all" or a comma-separated list of skill names; every skill ships instructions into the composed prompt, so trimming this trims the prefix — but it also removes the capability, not just the text), ' +
         '--speed must be one of the speed tiers the group\'s provider declares (Claude: "standard", "fast"), or "" to follow the install default; a provider that declares none accepts only "". ' +
         '--timezone (IANA id like "Europe/Lisbon"; "" clears back to the install default; scheduled-task times follow it immediately, message display after restart).',
       handler: async (args) => {
@@ -421,6 +424,7 @@ registerResource({
             | 'max_messages_per_prompt'
             | 'cli_scope'
             | 'timezone'
+            | 'skills'
           >
         > = {};
         if (args.provider !== undefined) updates.provider = args.provider as string;
@@ -448,9 +452,35 @@ registerResource({
           updates.cli_scope = scope;
         }
 
+        if (args.skills !== undefined) {
+          // Stored as JSON: the string "all", or an array of skill names. Validated
+          // against the skills that actually exist so a typo silently disabling a
+          // capability is impossible — a wrong name here removes the skill, it does
+          // not error at spawn.
+          const raw = String(args.skills).trim();
+          if (raw === 'all') {
+            updates.skills = JSON.stringify('all');
+          } else {
+            const wanted = raw
+              .split(',')
+              .map((n) => n.trim())
+              .filter(Boolean);
+            if (wanted.length === 0) {
+              throw new Error('--skills must be "all" or a comma-separated list of skill names');
+            }
+            const skillsDir = path.join(process.cwd(), 'container', 'skills');
+            const available = fs.existsSync(skillsDir) ? fs.readdirSync(skillsDir) : [];
+            const unknown = wanted.filter((n) => !available.includes(n));
+            if (unknown.length > 0) {
+              throw new Error(`Unknown skill(s): ${unknown.join(', ')}. Available: ${available.sort().join(', ')}`);
+            }
+            updates.skills = JSON.stringify([...new Set(wanted)]);
+          }
+        }
+
         if (Object.keys(updates).length === 0) {
           throw new Error(
-            'Nothing to update — provide at least one of: --provider, --model, --effort, --speed, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --timezone',
+            'Nothing to update — provide at least one of: --provider, --model, --effort, --speed, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --skills, --timezone',
           );
         }
 
