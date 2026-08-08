@@ -90,7 +90,6 @@ export async function updateContainerConfigScalars(
       | 'cli_scope'
       | 'timezone'
       | 'speed'
-      | 'skills'
     >
   >,
 ): Promise<void> {
