@@ -37,6 +37,13 @@ node /workspace/extra/tool-exec.js rag list
 node /workspace/extra/tool-exec.js rag search "<question>" --domain web --layer architecture --k 5
 ```
 
+**`--framework` scopes to one stack** and always keeps framework-agnostic sources in range,
+so narrowing to your stack never hides a rule that applies regardless of it:
+
+```bash
+node /workspace/extra/tool-exec.js rag search "<question>" --domain web --framework vue --k 5
+```
+
 **Stale sources are flagged, never hidden.** A hit with `stale: true` still answers the
 question, but say so before relying on it and offer to refresh the source. `rag list` marks
 the same sources, so you can check before a decision rather than after.
