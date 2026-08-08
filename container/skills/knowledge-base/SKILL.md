@@ -5,7 +5,7 @@ description: Search indexed reference books (RAG) for architectural and technica
 
 # Knowledge Base (RAG)
 
-A local vector index of ingested reference books (PDFs). Query it via the `rag` tool through the tool proxy. Embeddings run locally on the VPS (Ollama, `mxbai-embed-large`, 1024-dim) — nothing leaves the server, no API key.
+A local vector index of ingested reference books (PDFs) and curated documentation sites. Query it via the `rag` tool through the tool proxy. Embeddings run locally on the VPS (Ollama, `mxbai-embed-large`, 1024-dim) — nothing leaves the server, no API key.
 
 ## Search (all agents)
 
@@ -13,7 +13,7 @@ A local vector index of ingested reference books (PDFs). Query it via the `rag` 
 # Find relevant passages — scope to your domain(s) so unrelated books are excluded
 node /workspace/extra/tool-exec.js rag search "your question here" --domain <your-domain> --k 5
 
-# List indexed books (shows each source's domain)
+# List indexed sources (domain, layer, framework, age, staleness)
 node /workspace/extra/tool-exec.js rag list
 ```
 
@@ -22,8 +22,24 @@ node /workspace/extra/tool-exec.js rag list
 `search` returns JSON with `results[]`, each carrying:
 - `confidence` — cosine similarity 0–1 (higher = more relevant)
 - `source` — "Title — Author"
-- `page` — page number in the source
+- `page` — page number in the source (for a web source, which doc page it came from)
+- `chapter` — the heading path the chunk sits under, e.g. `Layers > Import rule on layers`
+- `url` — the exact page the chunk came from, for web sources; cite this
+- `layer`, `framework` — what kind of authority the source carries, and for which stack
+- `retrieved_at`, `stale` — when the source was last fetched, and whether that is older
+  than the staleness threshold (90 days, echoed as `staleness_days`)
 - `quote` — the exact indexed text
+
+**Layers scope a search *within* a domain**, by the kind of authority you need —
+`architecture` | `patterns` | `design-tokens` | `module:<name>`:
+
+```bash
+node /workspace/extra/tool-exec.js rag search "<question>" --domain web --layer architecture --k 5
+```
+
+**Stale sources are flagged, never hidden.** A hit with `stale: true` still answers the
+question, but say so before relying on it and offer to refresh the source. `rag list` marks
+the same sources, so you can check before a decision rather than after.
 
 ### Harder lookups: `--rerank` (opt-in)
 
@@ -56,13 +72,40 @@ Every claim you make from the knowledge base must be **traceable to a retrieved 
 - **Flag contradictions.** If a proposed design conflicts with an indexed source, surface the conflict with the citation, then suggest the source-backed alternative.
 - On architecture / design decisions, search the knowledge base **first**, then reason with what it returns.
 
-## Admin (host-side only — not runnable from inside the container)
+## Curating the knowledge base
 
-Ingesting and removing books runs on the VPS host, because the tool reads the PDF from the host filesystem:
+Books and PDFs are ingested **on the host** (the tool reads the file from the host
+filesystem). Documentation sites are ingested **through the proxy from anywhere**, because
+the fetching happens host-side too:
 
 ```bash
-# on the host (ssh agent@…):
-node ~/agent-system/tools/rag/rag.js ingest <file.pdf> --title "..." --author "..."
-node ~/agent-system/tools/rag/rag.js remove <source_id|title-substring>
-node ~/agent-system/tools/rag/rag.js stats
+# books / PDFs — on the host (ssh agent@…):
+node ~/agent-system/tools/rag/rag.js ingest <file.pdf> --title "..." --author "..." --domain <d>
+
+# documentation sites — via the proxy, from inside a container:
+#   many URLs make ONE source; each chunk keeps its own page URL for citation
+node /workspace/extra/tool-exec.js rag ingest <url> [<url> ...] \
+  --title "..." --author "..." --domain <d> --layer <architecture|patterns|design-tokens> \
+  --framework <vue|react|agnostic|…>
+
+node /workspace/extra/tool-exec.js rag refresh <source_id|title>   # re-fetch, re-chunk, re-embed
+node /workspace/extra/tool-exec.js rag set-meta <source_id> --layer <l> --framework <f>
+node /workspace/extra/tool-exec.js rag remove <source_id|title>    # confirm-gated: dry-run + token
+node /workspace/extra/tool-exec.js rag list
+node /workspace/extra/tool-exec.js rag stats
 ```
+
+Rules that keep the index worth trusting:
+
+- **Prose, not raw code.** From a repo take `docs/`, `README`, `*.md`; skip `src/`, tests,
+  `node_modules`.
+- **Chunked by heading** (H1/H2/H3) — one chunk, one concept. Never fixed-size splits.
+- **Deduplicated by URL.** A URL already in the index is refused; `refresh` it instead of
+  ingesting a second copy. `refresh` keeps the source id, so existing citations still resolve.
+- **Curated URL manifests** live on the host at `agent-system/tools/rag/sources/*.txt`, one
+  file per source — that is what a refresh re-fetches, and where a page is added or dropped.
+- **Fast-moving framework docs are not stored long-term** (release notes, provider-specific
+  OAuth docs). Fetch those fresh at task time and cite the version you read.
+
+`ingest`, `refresh`, `set-meta` and `remove` are classified as **writes** by the tool proxy and
+are audit-logged; `remove` additionally requires a confirmation token.
