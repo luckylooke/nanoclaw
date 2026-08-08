@@ -1,7 +1,17 @@
-staged=$(git diff --cached --name-only --diff-filter=ACM -- 'src/**/*.ts')
+# Re-stage whatever `format:fix` rewrites, so a commit never leaves the formatted
+# version behind as a dirty file.
+#
+# The pathspec matters. `src/**/*.ts` looks like it covers the tree but git's `**`
+# requires an intermediate directory, so it matches src/db/foo.ts and NOT src/foo.ts
+# — every file directly under src/, which is most of them. Prettier reformatted
+# src/claude-md-compose.test.ts on 2026-08-08, the re-add silently matched nothing,
+# and the reformat was left uncommitted. Match the directory and filter by suffix.
+staged=$(git diff --cached --name-only --diff-filter=ACM -- src | grep -E '\.(ts|tsx|mts|cts)$' || true)
 pnpm run format:fix
 if [ -n "$staged" ]; then
-  echo "$staged" | xargs git add
+  # Only files that were already staged. format:fix rewrites all of src/, and
+  # sweeping an unrelated file into someone's commit is worse than a dirty tree.
+  echo "$staged" | xargs -r git add --
 fi
 
 # Parse-gate BOTH shipped trees before anything can be committed.
