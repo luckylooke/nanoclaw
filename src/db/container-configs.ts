@@ -88,6 +88,7 @@ export async function updateContainerConfigScalars(
       | 'max_messages_per_prompt'
       | 'cli_scope'
       | 'timezone'
+      | 'skills'
     >
   >,
 ): Promise<void> {

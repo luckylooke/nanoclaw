@@ -35,6 +35,12 @@ function writePersona(folder: string, text: string): void {
   fs.writeFileSync(path.join(dir, PERSONA_PREPEND_FILE), text);
 }
 
+function writeMemory(folder: string, rel: string, text: string): void {
+  const file = path.join(GROUPS_DIR, folder, rel);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, text);
+}
+
 function importsOf(folder: string): string[] {
   const md = fs.readFileSync(path.join(GROUPS_DIR, folder, 'CLAUDE.md'), 'utf-8');
   return md.split('\n').filter((line) => line.startsWith('@'));
@@ -114,5 +120,47 @@ describe('composeGroupClaudeMd scheduling instructions (ncl tasks reach-in)', ()
     const imports = importsOf(ag.folder);
     expect(imports).not.toContain('@./.claude-fragments/module-scheduling.md');
     expect(imports).not.toContain('@./.claude-fragments/module-cli.md');
+  });
+});
+
+describe('composeGroupClaudeMd memory imports', () => {
+  it('imports the memory index LAST, after the shared base and fragments', () => {
+    const ag = group('ag-mem', 'mem');
+    seed(ag);
+    writeMemory('mem', 'memory/index.md', '# Memory Index');
+
+    composeGroupClaudeMd(ag);
+    const imports = importsOf(ag.folder);
+
+    // Memory is the most volatile part of the prompt, so it must sit after the
+    // shared base and every fragment — prompt caching is a prefix match, and
+    // anything before the volatile tail stays cacheable.
+    expect(imports.at(-1)).toBe('@./memory/index.md');
+    expect(imports.indexOf('@./.claude-shared.md')).toBeLessThan(
+      imports.indexOf('@./memory/index.md'),
+    );
+  });
+
+  it('does NOT import the format contract — the index links to it instead', () => {
+    // memory/system/definition.md is ~1.4k tokens of "how to write a memory
+    // file". That is needed when writing memory, which is occasional; paying for
+    // it on every turn is the frequency-of-use mistake this whole layout exists
+    // to avoid. The index carries a link to it.
+    const ag = group('ag-mem-contract', 'mem-contract');
+    seed(ag);
+    writeMemory('mem-contract', 'memory/index.md', '# Memory Index');
+    writeMemory('mem-contract', 'memory/system/definition.md', '# Memory System');
+
+    composeGroupClaudeMd(ag);
+    const imports = importsOf(ag.folder);
+    expect(imports).toContain('@./memory/index.md');
+    expect(imports).not.toContain('@./memory/system/definition.md');
+  });
+
+  it('is inert for a group with no memory directory', () => {
+    const bare = group('ag-no-mem', 'no-mem');
+    seed(bare);
+    composeGroupClaudeMd(bare);
+    expect(importsOf(bare.folder).some((i) => i.startsWith('@./memory/'))).toBe(false);
   });
 });

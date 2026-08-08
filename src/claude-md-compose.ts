@@ -7,7 +7,10 @@
  *   - optional per-skill fragments (skills that ship `instructions.md`)
  *   - optional per-MCP-server fragments (inline `instructions` field in
  *     `container.json`)
- *   - optional provider-neutral standing instructions
+ *   - optional provider-neutral standing instructions (`instructions.prepend.md`,
+ *     read by readGroupPersona and inlined as the persona fragment)
+ *   - the group's persistent memory index (`memory/index.md`) and the contract
+ *     describing it (`memory/system/definition.md`), imported last
  *
  * Runs on every spawn from `container-runner.buildMounts()`. Deterministic —
  * same inputs produce the same CLAUDE.md, and stale fragments are pruned.
@@ -25,6 +28,22 @@ import type { AgentGroup } from './types.js';
 // Fragment holding a template's persona prepend. Imported FIRST (before the
 // shared base) so the persona is the top of the composed system prompt.
 const PERSONA_FRAGMENT = 'persona.md';
+
+// The group's persistent memory index — the map of what it knows and where.
+// `memory/system/definition.md` claims this is loaded whenever a context window
+// is created; until now nothing loaded it, so the claim held only where some
+// other file happened to point at it.
+//
+// The index is imported; the format contract in memory/system/definition.md is
+// NOT. The map is needed to find things, which is most turns. The contract is
+// needed to write a memory file correctly, which is occasional — it costs ~1.4k
+// tokens every turn to answer a question the agent asks rarely, so the index
+// links to it instead.
+//
+// Imported LAST on purpose. Memory changes far more often than the shared base
+// or the fragment set, and prompt caching is a prefix match — putting the most
+// volatile content at the end keeps everything before it cacheable.
+const MEMORY_IMPORTS = ['memory/index.md'];
 
 // Symlink targets are container paths — dangling on host (hence the readlink
 // dance instead of existsSync), valid inside the container via RO mounts.
@@ -145,6 +164,11 @@ export async function composeGroupClaudeMd(group: AgentGroup): Promise<void> {
   imports.push('@./.claude-shared.md');
   for (const name of [...desired.keys()].filter((n) => n !== PERSONA_FRAGMENT).sort()) {
     imports.push(`@./.claude-fragments/${name}`);
+  }
+  for (const rel of MEMORY_IMPORTS) {
+    if (fs.existsSync(path.join(groupDir, rel))) {
+      imports.push(`@./${rel}`);
+    }
   }
   const body = [COMPOSED_HEADER, ...imports, ''].join('\n');
   writeAtomic(path.join(groupDir, 'CLAUDE.md'), body);
