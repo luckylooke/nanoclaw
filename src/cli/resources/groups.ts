@@ -391,9 +391,12 @@ registerResource({
             | 'max_messages_per_prompt'
             | 'cli_scope'
             | 'timezone'
-            | 'skills'
           >
         > = {};
+        // skills lives in a JSON column, so it does not go through the scalar
+        // updater — updateContainerConfigJson owns it, alongside mcp_servers and
+        // the package lists.
+        let skillsJson;
         if (args.provider !== undefined) updates.provider = args.provider as string;
         const timezone = parseTimezoneFlag(args.timezone);
         if (timezone !== undefined) updates.timezone = timezone;
@@ -418,7 +421,7 @@ registerResource({
           // not error at spawn.
           const raw = String(args.skills).trim();
           if (raw === 'all') {
-            updates.skills = JSON.stringify('all');
+            skillsJson = 'all';
           } else {
             const wanted = raw
               .split(',')
@@ -433,17 +436,18 @@ registerResource({
             if (unknown.length > 0) {
               throw new Error(`Unknown skill(s): ${unknown.join(', ')}. Available: ${available.sort().join(', ')}`);
             }
-            updates.skills = JSON.stringify([...new Set(wanted)]);
+            skillsJson = [...new Set(wanted)];
           }
         }
 
-        if (Object.keys(updates).length === 0) {
+        if (Object.keys(updates).length === 0 && skillsJson === undefined) {
           throw new Error(
             'Nothing to update — provide at least one of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --skills, --timezone',
           );
         }
 
-        await updateContainerConfigScalars(id, updates);
+        if (Object.keys(updates).length > 0) await updateContainerConfigScalars(id, updates);
+        if (skillsJson !== undefined) await updateContainerConfigJson(id, 'skills', skillsJson);
 
         const updated = (await getContainerConfig(id))!;
         return presentConfig(updated);
