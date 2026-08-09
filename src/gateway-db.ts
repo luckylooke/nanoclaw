@@ -167,6 +167,22 @@ export function initGatewayDb(): void {
       );
       CREATE INDEX IF NOT EXISTS idx_feedback_ts ON feedback(ts);
       CREATE INDEX IF NOT EXISTS idx_feedback_group ON feedback(group_slug);
+
+      -- Per-task budget gate: one row each time a task was told to stop and ask
+      -- (action='gate') or was hard-stopped (action='hard'). Without this the
+      -- feature is invisible — you would only ever see the agent's question and
+      -- have no way to tell it was the gate that produced it.
+      CREATE TABLE IF NOT EXISTS task_gates (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts TEXT NOT NULL,
+        trace_id TEXT,
+        group_slug TEXT,
+        action TEXT,          -- 'gate' | 'hard'
+        spent_eur REAL,
+        gate_eur REAL
+      );
+      CREATE INDEX IF NOT EXISTS idx_task_gates_ts ON task_gates(ts);
+      CREATE INDEX IF NOT EXISTS idx_task_gates_trace ON task_gates(trace_id);
     `);
     // Migration: resolved_model column for DBs created before T2 #7 (exact
     // model-id logging). CREATE TABLE IF NOT EXISTS won't add it to an existing table.
@@ -236,6 +252,16 @@ export function recordApiCall(row: ApiCallRow): void {
     // Keep the in-memory bucket cache tight between refreshes.
     const bucket = bucketForGroup(row.group_slug);
     if (bucket && row.cost_eur) _bucketTotals[bucket] += row.cost_eur;
+    // Same for the per-task tally. Only traces already being tracked are
+    // updated; an untracked one is seeded from the DB when it is first checked,
+    // so nothing is lost by skipping it here.
+    if (row.trace_id && row.cost_eur) {
+      const st = _traceSpend.get(row.trace_id);
+      if (st) {
+        st.spent += row.cost_eur;
+        st.seen = Date.now();
+      }
+    }
   } catch (err) {
     log.warn('Gateway: recordApiCall failed', { err: String(err) });
   }
@@ -294,6 +320,189 @@ export function checkBudget(slug: string | null): BudgetStatus | null {
   const spent = _bucketTotals[bucket] ?? 0;
   const cap = BUCKET_CAP_EUR[bucket];
   return { bucket, spent_eur: spent, cap_eur: cap, overCap: spent >= cap };
+}
+
+// --- Per-task budget gate ------------------------------------------------
+//
+// A "task" is one `x-trace-id`. The container's claude provider mints one per
+// query() and puts it in ANTHROPIC_CUSTOM_HEADERS on that process's env, so it
+// rides on EVERY request the turn makes — tool rounds, sub-agents, the lot —
+// and on nothing outside the turn. That is exactly the unit a person means by
+// "one thing I asked for", as opposed to the sub-steps the agent chooses.
+//
+// WHY A SOFT GATE, NOT A 429. Rejecting mid-turn kills the turn, throws away
+// reasoning already paid for, and reaches the user as an API error rather than
+// a question. Instead the proxy appends a directive to the request's system
+// prompt telling the agent to stop and ask. The turn then ends normally with a
+// summary and a question. The user's reply is a NEW turn with a NEW trace, so
+// it starts a fresh allowance — which is also how "ask again at every further
+// €3" falls out without any approval-token plumbing.
+//
+// The hard stop at 2× is the backstop for an agent that ignores the directive
+// and keeps calling tools: within ONE trace nothing may ever exceed it.
+//
+// Occasion: 2026-08-09, when a single admin turn spent €1.01 over 28 calls
+// re-deriving the same answer, and nothing in the system could notice.
+
+export const TASK_GATE_EUR = Number(process.env.TASK_GATE_EUR || 3);
+export const TASK_HARD_EUR = TASK_GATE_EUR * Number(process.env.TASK_GATE_HARD_MULTIPLE || 2);
+const TRACE_TTL_MS = 6 * 60 * 60 * 1000; // forget a trace long after any turn can still be live
+const TRACE_MAX = 5000; // hard ceiling on the map, in case TTL pruning never runs
+
+interface TraceState {
+  spent: number;
+  gatedTier: number; // highest €3 tier already announced to the agent
+  hardStopped: boolean; // whether the hard stop has already been recorded once
+  seen: number; // last touch, for pruning
+}
+const _traceSpend = new Map<string, TraceState>();
+
+function pruneTraces(): void {
+  const cutoff = Date.now() - TRACE_TTL_MS;
+  for (const [id, st] of _traceSpend) {
+    if (st.seen < cutoff) _traceSpend.delete(id);
+  }
+  if (_traceSpend.size > TRACE_MAX) {
+    // Oldest-first eviction; Map preserves insertion order.
+    const excess = _traceSpend.size - TRACE_MAX;
+    let i = 0;
+    for (const id of _traceSpend.keys()) {
+      if (i++ >= excess) break;
+      _traceSpend.delete(id);
+    }
+  }
+}
+
+/** Seed a trace's spend from the DB — covers a proxy restart mid-turn. */
+function traceState(traceId: string): TraceState {
+  let st = _traceSpend.get(traceId);
+  if (st) {
+    st.seen = Date.now();
+    return st;
+  }
+  let spent = 0;
+  if (_gw) {
+    try {
+      const row = _gw.prepare('SELECT SUM(cost_eur) AS total FROM api_calls WHERE trace_id = ?').get(traceId) as
+        | { total: number | null }
+        | undefined;
+      spent = row?.total ?? 0;
+    } catch (err) {
+      log.warn('Gateway: trace-spend seed failed', { err: String(err) });
+    }
+  }
+  st = { spent, gatedTier: Math.floor(spent / TASK_GATE_EUR), hardStopped: false, seen: Date.now() };
+  _traceSpend.set(traceId, st);
+  if (_traceSpend.size % 500 === 0) pruneTraces();
+  return st;
+}
+
+export type TaskGateAction = 'ok' | 'gate' | 'hard';
+export interface TaskBudgetStatus {
+  spent_eur: number;
+  gate_eur: number;
+  hard_eur: number;
+  tier: number;
+  action: TaskGateAction;
+  /** First time this decision was reached for this trace — the caller logs only these. */
+  record: boolean;
+}
+
+/**
+ * Where this task stands against its allowance.
+ *
+ * 'gate' is returned ONCE per €3 tier — calling this marks the tier announced,
+ * so a turn is not told to stop on every request after it crosses. Returns null
+ * when there is nothing to enforce (no trace id, DB down): the fail-open path.
+ *
+ * A task is NEVER hard-stopped without having been asked to stop nicely first.
+ * Measured 2026-08-09: with the gate at €0.05 for a test, a single first call
+ * cost €0.15 and cleared the soft gate AND the hard limit at once, so the turn
+ * was killed before it could say anything and the user got "On it — running
+ * health check…" as the final answer. That is precisely the truncated non-answer
+ * the soft gate exists to prevent, so crossing both at once now yields a gate,
+ * and only the request after it can be hard-stopped.
+ */
+export function checkTaskBudget(traceId: string | null): TaskBudgetStatus | null {
+  if (!_gw || !traceId || !(TASK_GATE_EUR > 0)) return null;
+  try {
+    const st = traceState(traceId);
+    const tier = Math.floor(st.spent / TASK_GATE_EUR);
+    const base = { spent_eur: st.spent, gate_eur: TASK_GATE_EUR, hard_eur: TASK_HARD_EUR, tier };
+    if (st.spent >= TASK_HARD_EUR) {
+      if (st.gatedTier === 0) {
+        // Blew past everything on one call and was never warned — warn now.
+        st.gatedTier = tier;
+        return { ...base, action: 'gate', record: true };
+      }
+      const first = !st.hardStopped;
+      st.hardStopped = true;
+      // Claude Code retries a 429, so without `record` one hard stop would
+      // write a row per retry (five, when this was measured).
+      return { ...base, action: 'hard', record: first };
+    }
+    if (tier > st.gatedTier) {
+      st.gatedTier = tier;
+      return { ...base, action: 'gate', record: true };
+    }
+    return { ...base, action: 'ok', record: false };
+  } catch (err) {
+    log.warn('Gateway: task-budget check failed', { err: String(err) });
+    return null;
+  }
+}
+
+/** Audit row so a gate that fired is visible afterwards, not just in the log. */
+export function recordTaskGate(row: {
+  trace_id: string | null;
+  group_slug: string | null;
+  action: TaskGateAction;
+  spent_eur: number;
+  gate_eur: number;
+}): void {
+  if (!_gw) return;
+  try {
+    _gw
+      .prepare(
+        `INSERT INTO task_gates (ts, trace_id, group_slug, action, spent_eur, gate_eur)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(new Date().toISOString(), row.trace_id, row.group_slug, row.action, row.spent_eur, row.gate_eur);
+  } catch (err) {
+    log.warn('Gateway: recordTaskGate failed', { err: String(err) });
+  }
+}
+
+// --- Daily cap for groups with no budget bucket --------------------------
+//
+// `eval`, `rag` and any future host CLI tool are uncapped by design (fail-open:
+// an unknown slug must never brick an agent). That is also how 2026-08-08 saw
+// €40.14 of eval traffic in seven hours with nothing to notice it. These calls
+// carry no trace id, so the per-task gate cannot see them; this is their
+// backstop — deliberately generous, meant to stop a runaway, not to police a
+// normal day of prompt tuning.
+const UNCAPPED_DAILY_EUR = Number(process.env.UNCAPPED_DAILY_EUR || 25);
+
+export interface DailyStatus {
+  group: string;
+  spent_eur: number;
+  cap_eur: number;
+  overCap: boolean;
+}
+
+export function checkUncappedDaily(slug: string | null): DailyStatus | null {
+  if (!_gw || !slug || bucketForGroup(slug) || !(UNCAPPED_DAILY_EUR > 0)) return null;
+  try {
+    const dayStart = new Date().toISOString().slice(0, 10) + 'T00:00:00.000Z';
+    const row = _gw
+      .prepare('SELECT SUM(cost_eur) AS total FROM api_calls WHERE group_slug = ? AND ts >= ?')
+      .get(slug, dayStart) as { total: number | null } | undefined;
+    const spent = row?.total ?? 0;
+    return { group: slug, spent_eur: spent, cap_eur: UNCAPPED_DAILY_EUR, overCap: spent >= UNCAPPED_DAILY_EUR };
+  } catch (err) {
+    log.warn('Gateway: uncapped-daily check failed', { err: String(err) });
+    return null;
+  }
 }
 
 // --- T1.3: outbound message index + feedback capture ---------------------
