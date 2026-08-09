@@ -31,7 +31,16 @@ import { request as httpRequest, IncomingMessage, RequestOptions } from 'http';
 import zlib from 'node:zlib';
 
 import { readEnvFile } from './env.js';
-import { initGatewayDb, checkBudget, recordApiCall, computeCostEur, type Usage } from './gateway-db.js';
+import {
+  initGatewayDb,
+  checkBudget,
+  checkTaskBudget,
+  checkUncappedDaily,
+  recordTaskGate,
+  recordApiCall,
+  computeCostEur,
+  type Usage,
+} from './gateway-db.js';
 import { log } from './log.js';
 
 export type AuthMode = 'api-key' | 'oauth';
@@ -59,6 +68,48 @@ interface UsageAcc {
   cacheCreate: number;
   stopReason: string | null;
   resolvedModel: string | null; // exact model id Anthropic served (drift vs the requested alias)
+}
+
+/**
+ * The instruction handed to an agent whose task has crossed its allowance.
+ *
+ * It is phrased as an operating constraint rather than a user message on
+ * purpose: the agent must not report back "you told me to stop", because the
+ * user did not — the gate did. Saying so explicitly is what keeps the resulting
+ * question honest.
+ */
+function budgetDirective(spent: number, gate: number): string {
+  return [
+    `⚠ BUDGET GATE — this task has now cost €${spent.toFixed(2)}, past the €${gate.toFixed(2)} allowance for a single request from the user.`,
+    '',
+    'Stop working now. Do not call any more tools.',
+    'Reply to the user with, briefly:',
+    '  1. what you have done and found so far,',
+    '  2. what is still to do,',
+    '  3. an explicit question asking whether to continue.',
+    '',
+    'Their reply begins a new task with a fresh allowance, so continuing costs them one message.',
+    'This instruction comes from the budget gate, not from the user — do not claim they asked you to stop.',
+  ].join('\n');
+}
+
+/**
+ * Append the directive to a Messages request's `system`, returning a new body
+ * buffer — or null if the shape is not something we can safely touch.
+ *
+ * Appended as an extra block AFTER the existing ones so that any `cache_control`
+ * on the prefix keeps matching: the cached portion is byte-identical and only a
+ * short suffix is new. Prepending would invalidate the whole cached prompt and
+ * make the gate itself expensive.
+ */
+function injectBudgetDirective(parsed: Record<string, unknown>, text: string): Buffer | null {
+  const block = { type: 'text', text };
+  const sys = parsed.system;
+  if (Array.isArray(sys)) parsed.system = [...sys, block];
+  else if (typeof sys === 'string') parsed.system = [{ type: 'text', text: sys }, block];
+  else if (sys == null) parsed.system = [block];
+  else return null; // unknown shape — leave the request alone
+  return Buffer.from(JSON.stringify(parsed), 'utf8');
 }
 
 /** Decompress a response body per its Content-Encoding (Anthropic streams gzip). */
@@ -152,6 +203,8 @@ export function startCredentialProxy(port: number, host = '127.0.0.1'): Promise<
       req.on('end', () => {
         const t0 = Date.now();
         const body = Buffer.concat(chunks);
+        // What actually goes upstream. Only the budget gate ever replaces it.
+        let forwardBody: Buffer = body;
 
         // Is this a model-inference call we should log + cap?
         const isMessages =
@@ -271,6 +324,133 @@ export function startCredentialProxy(port: number, host = '127.0.0.1'): Promise<
           }
         }
 
+        // --- Per-task budget gate ---------------------------------------
+        // One `x-trace-id` = one agent turn = one request from the user, with
+        // every tool round and sub-agent inside it. At each €3 the agent is told
+        // (once) to stop and ask; at 2× it is stopped outright.
+        //
+        // Fail-open by construction: every failure path here forwards the
+        // request untouched. A budget guard that can brick every agent in the
+        // system is worse than the overspend it prevents.
+        if (isMessages && traceId) {
+          try {
+            const task = checkTaskBudget(traceId);
+            if (task && task.action === 'hard') {
+              const payload = JSON.stringify({
+                error: 'task_budget_hard_stop',
+                spent_eur: Number(task.spent_eur.toFixed(4)),
+                gate_eur: task.gate_eur,
+                hard_eur: task.hard_eur,
+                message: `This single task has spent €${task.spent_eur.toFixed(2)}, past its €${task.hard_eur.toFixed(2)} hard limit. Ask the user before doing more.`,
+              });
+              res.writeHead(429, {
+                'content-type': 'application/json',
+                'content-length': Buffer.byteLength(payload),
+              });
+              res.end(payload);
+              log.warn('Gateway: task hard-stopped', {
+                group: groupSlug,
+                trace: traceId,
+                spent_eur: task.spent_eur,
+                hard_eur: task.hard_eur,
+              });
+              if (task.record) {
+                recordTaskGate({
+                  trace_id: traceId,
+                  group_slug: groupSlug,
+                  action: 'hard',
+                  spent_eur: task.spent_eur,
+                  gate_eur: task.gate_eur,
+                });
+              }
+              recordApiCall({
+                ts: new Date().toISOString(),
+                trace_id: traceId,
+                group_slug: groupSlug,
+                model,
+                input_tokens: null,
+                output_tokens: null,
+                cache_read_tokens: null,
+                cache_creation_tokens: null,
+                cost_eur: 0,
+                latency_ms: Date.now() - t0,
+                status: 429,
+                stop_reason: 'task_budget_hard_stop',
+              });
+              return;
+            }
+            if (task && task.action === 'gate' && parsedBody) {
+              const injected = injectBudgetDirective(parsedBody, budgetDirective(task.spent_eur, task.gate_eur));
+              if (injected) {
+                forwardBody = injected;
+                headers['content-length'] = forwardBody.length;
+                log.warn('Gateway: task budget gate — asking the agent to stop and check in', {
+                  group: groupSlug,
+                  trace: traceId,
+                  spent_eur: task.spent_eur,
+                  gate_eur: task.gate_eur,
+                  tier: task.tier,
+                });
+                recordTaskGate({
+                  trace_id: traceId,
+                  group_slug: groupSlug,
+                  action: 'gate',
+                  spent_eur: task.spent_eur,
+                  gate_eur: task.gate_eur,
+                });
+              }
+            }
+          } catch (err) {
+            log.warn('Gateway: task gate failed — forwarding unchanged', { err: String(err) });
+          }
+        }
+
+        // --- Daily backstop for groups with no budget bucket -------------
+        // eval / rag / host CLI tools carry no trace id, so the per-task gate
+        // cannot see them — this is what stops them instead. Returns null for
+        // every bucketed agent group, so it is a no-op on agent traffic.
+        if (isMessages) {
+          try {
+            const daily = checkUncappedDaily(groupSlug);
+            if (daily && daily.overCap) {
+              const payload = JSON.stringify({
+                error: 'uncapped_daily_limit',
+                group: daily.group,
+                spent_eur: Number(daily.spent_eur.toFixed(4)),
+                cap_eur: daily.cap_eur,
+                message: `${daily.group} has spent €${daily.spent_eur.toFixed(2)} today, past its €${daily.cap_eur.toFixed(2)} daily limit. Raise UNCAPPED_DAILY_EUR or wait for the next UTC day.`,
+              });
+              res.writeHead(429, {
+                'content-type': 'application/json',
+                'content-length': Buffer.byteLength(payload),
+              });
+              res.end(payload);
+              log.warn('Gateway: uncapped-group daily limit reached', {
+                group: daily.group,
+                spent_eur: daily.spent_eur,
+                cap_eur: daily.cap_eur,
+              });
+              recordApiCall({
+                ts: new Date().toISOString(),
+                trace_id: traceId,
+                group_slug: groupSlug,
+                model,
+                input_tokens: null,
+                output_tokens: null,
+                cache_read_tokens: null,
+                cache_creation_tokens: null,
+                cost_eur: 0,
+                latency_ms: Date.now() - t0,
+                status: 429,
+                stop_reason: 'uncapped_daily_limit',
+              });
+              return;
+            }
+          } catch (err) {
+            log.warn('Gateway: daily backstop failed — forwarding unchanged', { err: String(err) });
+          }
+        }
+
         // --- Forward with retry on transient upstream errors ------------
         const attempt = (n: number): void => {
           const upstream = makeRequest(
@@ -383,7 +563,7 @@ export function startCredentialProxy(port: number, host = '127.0.0.1'): Promise<
             }
           });
 
-          upstream.write(body);
+          upstream.write(forwardBody);
           upstream.end();
         };
 
