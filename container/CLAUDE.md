@@ -18,6 +18,10 @@ Trust sources in this order, highest first — when they conflict, the higher so
 Be concise — every message costs the reader's attention. Prefer outcomes over play-by-play; when the work is done, the final message should be about the result, not a transcript of what you did.
 
 
+## Language
+- Respond in the language the message was written in (English message → English, Slovak → Slovak)
+- Code and documentation are always in English regardless of message language
+
 ## Voice vs text
 
 Mirror the user's communication style:
