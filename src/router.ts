@@ -33,6 +33,7 @@ import { startTypingRefresh, stopTypingRefresh } from './modules/typing/index.js
 import { log } from './log.js';
 import { resolveSession, writeSessionMessage, writeOutboundDirect } from './session-manager.js';
 import { wakeContainer } from './container-runner.js';
+import { getMaintenance, hasBeenNotified, markNotified } from './maintenance.js';
 import { getSession } from './db/sessions.js';
 import type { AgentGroup, MessagingGroup, MessagingGroupAgent, Session } from './types.js';
 import type { InboundEvent } from './channels/adapter.js';
@@ -643,6 +644,38 @@ async function deliverToAgent(
   });
 
   if (wake) {
+    // Maintenance mode: the row above is already written and pending, so the
+    // message is safe. Decline to wake, and let host-sweep drain the backlog
+    // when the flag clears. No typing indicator — a multi-hour "typing…" reads
+    // as a broken agent, not a paused one.
+    const maint = getMaintenance();
+    if (maint) {
+      if (!hasBeenNotified(session.id)) {
+        // Answered by the host, not the agent: no container is running and none
+        // will start. One notice per session per window, so five messages do
+        // not produce five apologies.
+        writeOutboundDirect(session.agent_group_id, session.id, {
+          id: `maint-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          kind: 'chat',
+          platformId: deliveryAddr.platformId,
+          channelType: deliveryAddr.channelType,
+          threadId: deliveryAddr.threadId,
+          content: JSON.stringify({
+            text:
+              `🔧 The agent system is in maintenance (${maint.reason}). ` +
+              'Your message is queued and will be answered in order as soon as it is back — nothing is lost.',
+          }),
+        });
+        markNotified(session.id);
+      }
+      log.info('Message buffered — maintenance mode', {
+        sessionId: session.id,
+        agentGroup: agent.agent_group_id,
+        since: maint.since,
+      });
+      return;
+    }
+
     // Typing indicator + wake are only for the engaged branch; accumulated
     // messages sit silently until a real trigger fires.
     // Typing fires via the adapter instance that owns this chat's row.

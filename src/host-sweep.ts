@@ -36,6 +36,7 @@ import { getAgentGroup } from './db/agent-groups.js';
 import { log } from './log.js';
 import { heartbeatPath, withExistingMailboxSession } from './session-manager.js';
 import { getContainerStartedAtMs, isContainerRunning, killContainer, wakeContainer } from './container-runner.js';
+import { getMaintenance } from './maintenance.js';
 import type { Session } from './types.js';
 import type { ContainerState, InboundMailbox, OutboundMailbox } from './mailbox/index.js';
 
@@ -177,6 +178,15 @@ async function sweepSession(session: Session): Promise<void> {
       mailbox.applyProcessingAcks(mailbox.getTerminalProcessingAcks());
       dueCount = mailbox.countDueMessages();
       shouldWake = dueCount > 0 && !isContainerRunning(session.id);
+      // Maintenance mode gates the retry path too, or this loop would undo the
+      // gate in routeInbound within 60 seconds — the sweep exists precisely to
+      // wake sessions whose messages are sitting pending, which is every session
+      // during maintenance. Scheduled tasks are covered by the same check: they
+      // stay due and fire after release rather than being skipped.
+      if (shouldWake && getMaintenance()) {
+        log.debug('Holding due messages — maintenance mode', { sessionId: session.id, count: dueCount });
+        shouldWake = false;
+      }
       if (!shouldWake) {
         await maintainSessionMailbox(mailbox, session, agentGroup.id, false);
       }
