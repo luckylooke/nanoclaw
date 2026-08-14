@@ -23,19 +23,17 @@ import { enforceUpgradeTripwire } from './upgrade-state.js';
 
 // Response registry lives in response-registry.ts to break the
 // circular import cycle: src/index.ts imports src/modules/index.js for side
-// effects, and the modules call registerResponseHandler/onShutdown at top
-// level — which would hit a TDZ error if the arrays lived here. Re-exported
-// here so existing callers see the same surface.
+// effects, and the modules call registerResponseHandler at top level — which
+// would hit a TDZ error if the arrays lived here. Re-exported here so existing
+// callers see the same surface.
 import {
   getResponseHandlers,
   type ResponsePayload,
   registerResponseHandler,
   getReactionHandlers,
-  onShutdown,
-  getShutdownCallbacks,
   type ResponseHandler,
 } from './response-registry.js';
-export { registerResponseHandler, onShutdown };
+export { registerResponseHandler };
 export type { ResponsePayload, ResponseHandler };
 
 const hostAbortController = new AbortController();

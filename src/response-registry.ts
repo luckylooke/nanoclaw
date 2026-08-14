@@ -51,14 +51,3 @@ export function registerReactionHandler(handler: ReactionHandler): void {
 export function getReactionHandlers(): readonly ReactionHandler[] {
   return reactionHandlers;
 }
-
-type ShutdownCallback = () => void | Promise<void>;
-const shutdownCallbacks: ShutdownCallback[] = [];
-
-export function onShutdown(cb: ShutdownCallback): void {
-  shutdownCallbacks.push(cb);
-}
-
-export function getShutdownCallbacks(): readonly ShutdownCallback[] {
-  return shutdownCallbacks;
-}

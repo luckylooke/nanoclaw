@@ -122,12 +122,19 @@ describe('host module lifecycle registry', () => {
     });
   });
 
-  it('registers built-in approvals cleanup with the host lifecycle', async () => {
+  // Fork divergence: upstream's "built-in approvals cleanup" was the OneCLI
+  // approval handler's stop hook, and this fork deleted OneCLI in 48a75563. The
+  // approvals module now owns nothing that needs draining — the credential proxy,
+  // the one host resource that does, is closed directly in index.ts's shutdown().
+  // Asserting 1 here would only be satisfiable by registering a no-op to make a
+  // count come out right, so this asserts the fork's real invariant instead:
+  // importing the module registers nothing.
+  it('registers no host-shutdown callback from approvals (OneCLI removed in this fork)', async () => {
     const lifecycle = await import('./host-lifecycle.js');
 
     expect(lifecycle.getHostShutdownCallbacks()).toHaveLength(0);
     await import('./modules/approvals/index.js');
-    expect(lifecycle.getHostShutdownCallbacks()).toHaveLength(1);
+    expect(lifecycle.getHostShutdownCallbacks()).toHaveLength(0);
   });
 });
 
