@@ -70,6 +70,16 @@ const WATCHED = [
   'tool-proxy/tool-exec.js',
 ].map((rel) => ({ rel, abs: path.join(REPO, rel) }));
 
+// `--list-watched` prints the fingerprint list, one relative path per line, and
+// exits. It exists so the drift test can ask this script what it watches instead
+// of regex-parsing the array out of the source: the list is hardcoded, and
+// nothing otherwise notices when a new cron job or systemd service is added and
+// silently goes unfingerprinted.
+if (process.argv.includes('--list-watched')) {
+  for (const w of WATCHED) process.stdout.write(w.rel + '\n');
+  process.exit(0);
+}
+
 const iso = () => new Date().toISOString();
 function log(m) { process.stdout.write(`[watchdog-alive] ${iso()} ${m}\n`); }
 function sh(cmd, cwd) {
