@@ -556,26 +556,52 @@ export async function buildMounts(
   // `agent-system/` inside its mount.
   const repoDir = path.join(groupDir, 'agent-system');
   if (fs.existsSync(repoDir)) {
-    // Bind agent-system over ITSELF, rw and content-unchanged, purely so it
-    // becomes a mountpoint. Without this the RO mounts below are escapable, which
-    // a fixture test demonstrated rather than a review predicting: Linux attaches
-    // a mount to the dentry, not the path, so `mv agent-system agent-system-x`
-    // succeeds, drags the RO mounts along, and frees /workspace/agent/agent-system
-    // to be recreated writable. See spec/fork-features.yaml, ro-host-code-mounts.
-    mounts.push({
-      hostPath: repoDir,
-      containerPath: '/workspace/agent/agent-system',
-      readonly: false,
-      mountClass: 'group-state',
-      scope,
-    });
-    for (const sub of ['tools', 'tool-proxy']) {
+    // First, bind `agent-system` over itself — RW, content unchanged — purely so
+    // that it becomes a *mountpoint*. Without this the nested RO mounts below are
+    // escapable, which a fixture test proved rather than predicted: Linux attaches
+    // a mount to the dentry, not to the path, so `mv agent-system agent-system-x`
+    // succeeds, carries the RO mounts along with it, and leaves
+    // /workspace/agent/agent-system free to be recreated as a writable decoy —
+    // which the host's cron symlinks (`~/agent-system`, `~/tool-proxy`) would then
+    // resolve to. Renaming a mountpoint fails EBUSY, which closes that. The
+    // pre-existing nested RO mounts (container.json, plugins/, CLAUDE.md) never
+    // needed this only because their parent is /workspace/agent, the mount root,
+    // which is equally unrenameable.
+    const CREPO = '/workspace/agent/agent-system';
+    mounts.push({ hostPath: repoDir, containerPath: CREPO, readonly: false, mountClass: 'group-state', scope });
+
+    // RO subtrees. `tools` and `tool-proxy` are host-side privileged code (cron
+    // watchdog, dashboard, otel-collector; the daemon that loads every secret).
+    // `shared` is the shared-memory source of truth: `share` enforces that an
+    // agent may promote only its own memory, and the proxy forwards the caller's
+    // group to make that stick — but a direct write through this mount would
+    // sidestep the whole check, `audiences.json` included, and `memory sync`
+    // would then materialise the result into every agent. `.git` keeps an agent
+    // from rewriting history or corrupting the index; the host-side `git` tool
+    // is confined to the caller's own group dir, so nothing legitimate needs it.
+    for (const sub of ['tools', 'tool-proxy', 'shared', '.git']) {
       const hostPath = path.join(repoDir, sub);
       if (fs.existsSync(hostPath)) {
+        mounts.push({ hostPath, containerPath: `${CREPO}/${sub}`, readonly: true, mountClass: 'group-state', scope });
+      }
+    }
+
+    // groups/ is RO with this agent's OWN group nested back RW, so the
+    // Orchestrator gets the scope every other agent already has — its own
+    // directory — instead of write access to all nine agents' SOUL.md,
+    // CLAUDE.local.md and memory. drift-watch hashes exactly those files, but
+    // detection is after the fact; this removes the reach. RW-nested-inside-RO
+    // is the mirror of the RO-nested-inside-RW pattern above and was verified
+    // in a fixture, not assumed.
+    const groupsDir = path.join(repoDir, 'groups');
+    if (fs.existsSync(groupsDir)) {
+      mounts.push({ hostPath: groupsDir, containerPath: `${CREPO}/groups`, readonly: true, mountClass: 'group-state', scope });
+      const ownGroupDir = path.join(groupsDir, agentGroup.folder);
+      if (fs.existsSync(ownGroupDir)) {
         mounts.push({
-          hostPath,
-          containerPath: `/workspace/agent/agent-system/${sub}`,
-          readonly: true,
+          hostPath: ownGroupDir,
+          containerPath: `${CREPO}/groups/${agentGroup.folder}`,
+          readonly: false,
           mountClass: 'group-state',
           scope,
         });
