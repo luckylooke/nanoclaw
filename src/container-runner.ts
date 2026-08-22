@@ -540,6 +540,49 @@ export async function buildMounts(
     scope,
   });
 
+  // Host-side privileged code, nested RO on top of the RW group mount.
+  //
+  // The Orchestrator's group dir is the only one that is a real directory rather
+  // than a symlink into `agent-system/groups/<group>`, so its RW mount exposes the
+  // WHOLE agent-system repo. Two subtrees in there run on the host with privileges
+  // the container is not supposed to have: `tools/` (the cron watchdog —
+  // health-monitor, daily-reset, drift-watch — plus the dashboard and
+  // otel-collector services) and `tool-proxy/` (the daemon that loads every secret
+  // and enforces the confirm-token gate; `~/tool-proxy` is a symlink to it, same
+  // inode). An agent could edit either: the first to disable the only thing that
+  // would report an outage it caused, the second to reach the secrets.
+  // health-monitor's own header claimed it lived outside the mounted tree. It did
+  // not. Guarded on existence rather than a group name because no other group has
+  // `agent-system/` inside its mount.
+  const repoDir = path.join(groupDir, 'agent-system');
+  if (fs.existsSync(repoDir)) {
+    // Bind agent-system over ITSELF, rw and content-unchanged, purely so it
+    // becomes a mountpoint. Without this the RO mounts below are escapable, which
+    // a fixture test demonstrated rather than a review predicting: Linux attaches
+    // a mount to the dentry, not the path, so `mv agent-system agent-system-x`
+    // succeeds, drags the RO mounts along, and frees /workspace/agent/agent-system
+    // to be recreated writable. See spec/fork-features.yaml, ro-host-code-mounts.
+    mounts.push({
+      hostPath: repoDir,
+      containerPath: '/workspace/agent/agent-system',
+      readonly: false,
+      mountClass: 'group-state',
+      scope,
+    });
+    for (const sub of ['tools', 'tool-proxy']) {
+      const hostPath = path.join(repoDir, sub);
+      if (fs.existsSync(hostPath)) {
+        mounts.push({
+          hostPath,
+          containerPath: `/workspace/agent/agent-system/${sub}`,
+          readonly: true,
+          mountClass: 'group-state',
+          scope,
+        });
+      }
+    }
+  }
+
   // Composer-managed CLAUDE.md artifacts — nested RO mounts, regenerated from
   // the shared base + fragments on every spawn.
   const composedClaudeMd = path.join(groupDir, 'CLAUDE.md');
