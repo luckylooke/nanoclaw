@@ -76,7 +76,15 @@ let prev;
 try { prev = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')); }
 catch (e) { prev = { fingerprints: {}, lastAlertAt: null, lastConditions: [] }; }
 
-const findings = [];   // { key, text }
+// Two shapes of finding, and they must not share one lifecycle.
+// A CONDITION persists until it is fixed (health-monitor is not running), so it
+// earns a re-nag while it lasts and a green notice when it clears. An EVENT
+// happened once (a watched file changed or vanished) — the baseline advances the
+// moment it is reported, so it can never "clear", and treating it as a condition
+// posts a meaningless recovery on the next tick. That is not hypothetical: the
+// first real edit after this script shipped (a comment fix in health-monitor.cjs)
+// would have cost three Slack messages for one intentional change.
+const findings = [];   // { key, text, event?: true }
 
 // ---------- 1. dead-man's switch ----------
 (() => {
@@ -110,7 +118,7 @@ for (const { rel, abs } of WATCHED) {
   catch (e) {
     fingerprints[rel] = null;
     if (prev.fingerprints && prev.fingerprints[rel]) {
-      findings.push({ key: `gone:${rel}`, text: `*${rel} has disappeared* — it was present at the last check and cron/systemd still expects it.` });
+      findings.push({ key: `gone:${rel}`, event: true, text: `*${rel} has disappeared* — it was present at the last check and cron/systemd still expects it.` });
     }
     continue;
   }
@@ -125,7 +133,7 @@ for (const { rel, abs } of WATCHED) {
   const porcelain = sh(`git status --porcelain -- ${JSON.stringify(rel)}`, REPO);
   const committed = porcelain === '';
   const head = sh(`git log -1 --format=%h\\ %s -- ${JSON.stringify(rel)}`, REPO) || 'unknown';
-  findings.push({ key: `changed:${rel}:${curSha.slice(0, 12)}`, text:
+  findings.push({ key: `changed:${rel}:${curSha.slice(0, 12)}`, event: true, text:
     `*${rel} changed* — sha \`${old.sha.slice(0, 8)}\` → \`${curSha.slice(0, 8)}\` ` +
     `(${cur.length - old.bytes >= 0 ? '+' : ''}${cur.length - old.bytes} bytes)\n` +
     (committed
@@ -134,15 +142,17 @@ for (const { rel, abs } of WATCHED) {
 }
 
 // ---------- alert ----------
-const conditions = findings.map((f) => f.key).sort();
+const conditions = findings.filter((f) => !f.event).map((f) => f.key).sort();
+const events = findings.filter((f) => f.event).map((f) => f.key).sort();
 const prevConditions = (prev.lastConditions || []).slice().sort();
-const isNew = conditions.some((c) => !prevConditions.includes(c));
+const isNew = events.length > 0 || conditions.some((c) => !prevConditions.includes(c));
 const hoursSince = prev.lastAlertAt ? (Date.now() - new Date(prev.lastAlertAt).getTime()) / 3.6e6 : Infinity;
 const recovered = prevConditions.length > 0 && conditions.length === 0;
 let kind = null;
 if (recovered) kind = 'recovery';
 else if (isNew) kind = 'new';
 else if (conditions.length && hoursSince >= RE_ALERT_HOURS) kind = 'renag';
+// `events` never gate recovery: they are already gone by the next tick.
 
 const host = sh('hostname') || 'vps';
 let text = '';
@@ -182,7 +192,12 @@ const state = {
 if (!DRY_RUN) {
   try { fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2)); } catch (e) { log('could not write state: ' + e.message); }
 }
-log(`findings=${findings.length} [${conditions.join(',')}] alert=${kind || 'no'}${SEED ? ' (SEED)' : ''}${DRY_RUN ? ' (DRY RUN — nothing posted, state untouched)' : ''}`);
+log(`findings=${findings.length} conditions=[${conditions.join(',')}] events=[${events.join(',')}] alert=${kind || 'no'}${SEED ? ' (SEED)' : ''}${DRY_RUN ? ' (DRY RUN — nothing posted, state untouched)' : ''}`);
 if (DRY_RUN || SEED) { for (const f of findings) log('  ' + f.text.replace(/\n/g, ' ')); if (text) log('would post:\n' + text); }
 
-(async () => { if (kind && !DRY_RUN && !SEED) await slackPost(text); })();
+// Log whether the alert actually got out. A watchdog that fails silently to
+// alert is worse than one that does not run: the log would look identical to
+// a healthy tick. slackPost() already logs the failure reason.
+(async () => {
+  if (kind && !DRY_RUN && !SEED) log(`alert posted: ${await slackPost(text)}`);
+})();
