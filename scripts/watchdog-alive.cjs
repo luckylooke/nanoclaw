@@ -48,6 +48,12 @@ const RE_ALERT_HOURS = 6;
 
 const DRY_RUN = process.argv.includes('--dry-run');
 const SEED = process.argv.includes('--seed');
+// Test seam. --dry-run cannot express "advance the state file but post nothing",
+// and that is exactly the sequence worth testing: an event alerts on one tick
+// and must be silent on the next. Without this a test would either fail to
+// reproduce the bug it guards or post to the real #agent-admin, since a token is
+// present on the host that runs the suite.
+const NO_POST = process.env.WA_NO_POST === '1';
 
 // Every host-side script that runs with privileges the containers do not have:
 // cron entries, systemd user services, and the pre-commit syntax gate.
@@ -199,5 +205,7 @@ if (DRY_RUN || SEED) { for (const f of findings) log('  ' + f.text.replace(/\n/g
 // alert is worse than one that does not run: the log would look identical to
 // a healthy tick. slackPost() already logs the failure reason.
 (async () => {
-  if (kind && !DRY_RUN && !SEED) log(`alert posted: ${await slackPost(text)}`);
+  if (!kind || DRY_RUN || SEED) return;
+  if (NO_POST) return log('alert suppressed: WA_NO_POST');
+  log(`alert posted: ${await slackPost(text)}`);
 })();
