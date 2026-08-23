@@ -25,6 +25,14 @@ import type { AgentGroup, ContainerConfigRow } from './types.js';
  */
 export const CONTAINER_PLUGINS_DIR = '/workspace/agent/plugins';
 
+/**
+ * Container-side directory holding this group's tool-proxy socket (SEC-AI2).
+ * A directory rather than the socket file itself so the mount survives the
+ * socket being recreated; /workspace/extra is where the other host-provided
+ * helpers (tool-exec.js, tools/) already land.
+ */
+export const CONTAINER_TOOL_PROXY_SOCK_DIR = '/workspace/extra/tool-proxy-sock';
+
 export interface McpStdioServerConfig {
   type?: 'stdio';
   command: string;

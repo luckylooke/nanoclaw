@@ -27,6 +27,10 @@ import {
   EGRESS_PROXY_PORT,
   OTEL_COLLECTOR_PORT,
 } from '../config.js';
+import fs from 'fs';
+import path from 'path';
+
+import { CONTAINER_TOOL_PROXY_SOCK_DIR } from '../container-config.js';
 import { getAgentGroup } from '../db/agent-groups.js';
 import { registerGatewayProvider } from './gateway-provider-registry.js';
 
@@ -75,6 +79,10 @@ export function gatewayEnv(input: GatewayEnvInput): Record<string, string> {
   if (otel) {
     const endpoint = input.otelEndpoint ?? process.env.AGENT_OTEL_ENDPOINT ?? `http://${host}:${OTEL_COLLECTOR_PORT}`;
     Object.assign(env, {
+      // Without these two Claude Code emits nothing and every OTEL_* below is
+      // inert — the exporter config is not the switch, these are.
+      CLAUDE_CODE_ENABLE_TELEMETRY: '1',
+      CLAUDE_CODE_ENHANCED_TELEMETRY_BETA: '1',
       OTEL_TRACES_EXPORTER: 'otlp',
       OTEL_LOGS_EXPORTER: 'otlp',
       OTEL_METRICS_EXPORTER: 'otlp',
@@ -108,6 +116,14 @@ registerGatewayProvider('credential-proxy', () => ({
     // Fall back to the id rather than throwing: a missing row must not stop a
     // spawn, and an attributable-but-ugly header beats no attribution.
     const folder = group?.folder ?? key.agentGroupId;
-    return { env: gatewayEnv({ host, folder }) };
+    const env = gatewayEnv({ host, folder });
+    // Per-group tool-proxy socket: reaching it IS the credential, and the group
+    // is proven by the mount rather than claimed in a request body. Set only when
+    // the host actually has a socket dir for this group, so a group without one
+    // falls back rather than pointing at a path that is not mounted.
+    if (process.env.HOME && fs.existsSync(path.join(process.env.HOME, 'tool-proxy-sockets', folder))) {
+      env.TOOL_PROXY_SOCKET = `${CONTAINER_TOOL_PROXY_SOCK_DIR}/tool-proxy.sock`;
+    }
+    return { env };
   },
 }));

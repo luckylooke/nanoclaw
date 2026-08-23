@@ -24,7 +24,7 @@ import {
   OTEL_COLLECTOR_PORT,
   TIMEZONE,
 } from './config.js';
-import { CONTAINER_PLUGINS_DIR, materializeContainerJson } from './container-config.js';
+import { CONTAINER_PLUGINS_DIR, CONTAINER_TOOL_PROXY_SOCK_DIR, materializeContainerJson } from './container-config.js';
 import { classifyComplexity, tuningForTier, DEFAULT_STATIC_WINDOW } from './complexity-tier.js';
 import { getLatestTriggerText } from './db/session-db.js';
 import { getContainerConfig } from './db/container-configs.js';
@@ -227,6 +227,9 @@ async function spawnContainer(session: Session): Promise<void> {
     contribution,
     gateway,
     mailboxEnvironment,
+    // Adaptive per-spawn tuning: the tier for THIS message maps to a compact
+    // window. Delivered as env because the runner reads it at startup.
+    forkEnv: { CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(compactWindow) },
   });
 
   log.info('Spawning session', { sessionId: session.id, agentGroup: agentGroup.name, containerName });
@@ -631,6 +634,19 @@ export function buildMounts(
     scope,
   });
 
+  // SEC-AI2: this group's tool-proxy socket, and no other group's. Reaching the
+  // socket is what authenticates the caller, so the group is proven by the mount
+  // rather than claimed in the request body — which is what it was before, only
+  // shape-validated, while AGENT_GROUP is passed into every tool and scopes
+  // `memory` audiences. Mount the DIRECTORY, not the socket file: a front-end
+  // restart recreates the socket with a new inode, and a file-level bind mount
+  // would keep pointing at the deleted one. Read-write because a client must be
+  // able to connect(); the socket grants nothing beyond the tool-proxy API.
+  const toolProxySockDir = path.join(process.env.HOME || '', 'tool-proxy-sockets', agentGroup.folder);
+  if (process.env.HOME && fs.existsSync(toolProxySockDir)) {
+    mounts.push({ hostPath: toolProxySockDir, containerPath: CONTAINER_TOOL_PROXY_SOCK_DIR, readonly: false });
+  }
+
   // Host-side privileged code, nested RO on top of the RW group mount.
   //
   // The Orchestrator's group dir is the only one that is a real directory rather
@@ -757,6 +773,15 @@ export interface ComposeSessionSpecInput {
   session: Session;
   containerName: string;
   mounts: VolumeMount[];
+  /**
+   * Fork-only per-session env that no other seam can carry. The gateway provider
+   * handles everything static (credentials, egress, telemetry); this is for
+   * values computed HERE from this turn's message — today just the adaptive
+   * compact window from `complexity-tier.ts`, which the provider cannot see
+   * because contribute() is given a SessionKey, not the inbound text.
+   * See spec/fork-features.yaml, feature `complexity-tier`.
+   */
+  forkEnv?: Record<string, string>;
   containerConfig: import('./container-config.js').ContainerConfig;
   contribution: ProviderContainerContribution;
   /**
@@ -794,6 +819,7 @@ export function composeSessionSpec(input: ComposeSessionSpecInput): SessionSpec 
   const env: Record<string, string> = {
     TZ: containerConfig.timezone ?? TIMEZONE,
     ...mailboxEnvironment,
+    ...(input.forkEnv ?? {}),
   };
   // The contributed lane (ContainerSpec.contributedEnv): registry-sourced env,
   // exempt from the credential-NAME check and still refused credential VALUES.
