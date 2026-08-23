@@ -14,6 +14,8 @@ const envConfig = readEnvFile([
   'CONTAINER_CPU_LIMIT',
   'CONTAINER_MEMORY_LIMIT',
   'CONTAINER_PIDS_LIMIT',
+  'EGRESS_PROXY_PORT',
+  'NANOCLAW_EGRESS_PROXY',
   'NANOCLAW_EGRESS_LOCKDOWN',
   'NANOCLAW_EGRESS_NETWORK',
   'ONECLI_GATEWAY_CONTAINER',
@@ -87,6 +89,15 @@ export const CONTAINER_MAX_OUTPUT_SIZE = parseInt(process.env.CONTAINER_MAX_OUTP
 // bridge differs (e.g. rootless Docker → set CREDENTIAL_PROXY_HOST=0.0.0.0).
 export const CREDENTIAL_PROXY_PORT = parseInt(process.env.CREDENTIAL_PROXY_PORT || '3002', 10);
 export const CREDENTIAL_PROXY_HOST = process.env.CREDENTIAL_PROXY_HOST || '172.17.0.1';
+
+// Egress proxy (SEC-AI1). Agents keep WebFetch and agent-browser, but every
+// outbound request goes through an allowlisting squid on the docker bridge that
+// logs each destination. Same reachability model as the credential proxy: bound
+// on 172.17.0.1, reached via host.docker.internal, opened in ufw on docker0.
+// Set NANOCLAW_EGRESS_PROXY=false to bypass it (agents then have open egress).
+export const EGRESS_PROXY_ENABLED =
+  (process.env.NANOCLAW_EGRESS_PROXY || envConfig.NANOCLAW_EGRESS_PROXY || 'true') !== 'false';
+export const EGRESS_PROXY_PORT = parseInt(process.env.EGRESS_PROXY_PORT || envConfig.EGRESS_PROXY_PORT || '3128', 10);
 
 // Host-side OTLP collector (agent-system/tools/otel/collector.js). Same
 // reachability model as the credential proxy: bound on the docker bridge,
