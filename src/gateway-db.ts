@@ -78,7 +78,7 @@ export function computeCostEur(model: string | null, u: Usage): number {
 
 // --- Budget buckets ------------------------------------------------------
 
-export type Bucket = 'personal' | 'dev';
+export type Bucket = 'personal' | 'dev' | 'eval';
 
 // group `folder` slug → budget bucket. No such mapping exists elsewhere in the
 // codebase; this is the single source of truth. Unlisted slugs (e.g.
@@ -93,9 +93,13 @@ const GROUP_BUCKET: Record<string, Bucket> = {
   health: 'personal',
   home: 'personal',
   'dm-with-ignac': 'personal',
+  // Host-side eval runs get their own bucket so a month of prompt tuning
+  // cannot eat the dev agents' allowance. Unlike every other bucketed slug
+  // it ALSO keeps the daily backstop below — see DAILY_GUARDED.
+  eval: 'eval',
 };
 
-const BUCKET_CAP_EUR: Record<Bucket, number> = { personal: 30, dev: 300 };
+const BUCKET_CAP_EUR: Record<Bucket, number> = { personal: 30, dev: 300, eval: 50 };
 
 export function bucketForGroup(slug: string | null): Bucket | null {
   if (!slug) return null;
@@ -270,7 +274,7 @@ export function recordApiCall(row: ApiCallRow): void {
 // --- Month-to-date cap checks (cached) -----------------------------------
 
 const REFRESH_MS = 30_000;
-let _bucketTotals: Record<Bucket, number> = { personal: 0, dev: 0 };
+let _bucketTotals: Record<Bucket, number> = { personal: 0, dev: 0, eval: 0 };
 let _lastRefresh = 0;
 
 function startOfMonthISO(): string {
@@ -283,7 +287,7 @@ function refreshBucketTotals(): void {
   const rows = _gw
     .prepare('SELECT group_slug AS slug, SUM(cost_eur) AS total FROM api_calls WHERE ts >= ? GROUP BY group_slug')
     .all(startOfMonthISO()) as Array<{ slug: string | null; total: number | null }>;
-  const totals: Record<Bucket, number> = { personal: 0, dev: 0 };
+  const totals: Record<Bucket, number> = { personal: 0, dev: 0, eval: 0 };
   for (const r of rows) {
     const bucket = bucketForGroup(r.slug);
     if (bucket) totals[bucket] += r.total ?? 0;
@@ -473,15 +477,21 @@ export function recordTaskGate(row: {
   }
 }
 
-// --- Daily cap for groups with no budget bucket --------------------------
+// --- Daily cap for host-side callers -------------------------------------
 //
-// `eval`, `rag` and any future host CLI tool are uncapped by design (fail-open:
+// `rag` and any future host CLI tool are uncapped by design (fail-open:
 // an unknown slug must never brick an agent). That is also how 2026-08-08 saw
 // €40.14 of eval traffic in seven hours with nothing to notice it. These calls
 // carry no trace id, so the per-task gate cannot see them; this is their
 // backstop — deliberately generous, meant to stop a runaway, not to police a
 // normal day of prompt tuning.
+//
+// `eval` is bucketed now (€50/mo) but keeps this daily guard as well, because
+// a month-to-date cap cannot stop the failure that actually happened: €40.14
+// burned in seven hours, comfortably inside any monthly figure. Slugs listed
+// in DAILY_GUARDED are checked here even though bucketForGroup() knows them.
 const UNCAPPED_DAILY_EUR = Number(process.env.UNCAPPED_DAILY_EUR || 25);
+const DAILY_GUARDED = new Set(['eval', 'rag']);
 
 export interface DailyStatus {
   group: string;
@@ -491,7 +501,8 @@ export interface DailyStatus {
 }
 
 export function checkUncappedDaily(slug: string | null): DailyStatus | null {
-  if (!_gw || !slug || bucketForGroup(slug) || !(UNCAPPED_DAILY_EUR > 0)) return null;
+  if (!_gw || !slug || !(UNCAPPED_DAILY_EUR > 0)) return null;
+  if (bucketForGroup(slug) && !DAILY_GUARDED.has(slug)) return null;
   try {
     const dayStart = new Date().toISOString().slice(0, 10) + 'T00:00:00.000Z';
     const row = _gw
