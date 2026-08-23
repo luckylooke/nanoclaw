@@ -68,6 +68,10 @@ const WATCHED = [
   'tools/otel/collector.js',
   'tool-proxy/daemon.js',
   'tool-proxy/tool-exec.js',
+  // SEC-AI2: holds the shared bearer token host-side and stamps each call's
+  // group from the socket it arrived on. Tampering with it would let one
+  // agent present another's identity to every host-side tool.
+  'tool-proxy/socket-frontend.js',
 ].map((rel) => ({ rel, abs: path.join(REPO, rel) }));
 
 // `--list-watched` prints the fingerprint list, one relative path per line, and
