@@ -120,6 +120,10 @@ export interface InboundMailbox {
   prunePendingMessages(channelType: string, before: string, keep: number): number;
   getInboundHistory(limit: number): MailboxHistoryMessage[];
   getConversationRoot(): MailboxTimelineMessage | undefined;
+  /** Text of the most recent triggering inbound message. Fork: adaptive per-spawn tuning. */
+  getLatestTriggerText(): string | null;
+  /** Raw content JSON of one inbound message by id. Fork: reply-feedback attribution. */
+  getInboundContentById(messageId: string): string | null;
   findTaskBySeriesSlug(slug: string): TaskRecord | undefined;
 }
 
