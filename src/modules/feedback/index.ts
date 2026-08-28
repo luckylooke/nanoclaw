@@ -47,10 +47,10 @@ export function emojiToSignal(reaction: InboundReaction): string {
 }
 
 /** sender_scope='known': member of, or admin/owner over, the reacted group. */
-function isKnownReactor(reaction: InboundReaction, agentGroupId: string): boolean {
+async function isKnownReactor(reaction: InboundReaction, agentGroupId: string): Promise<boolean> {
   if (!reaction.userId) return false;
   const nsId = `${reaction.channelType}:${reaction.userId}`;
-  return isMember(nsId, agentGroupId) || hasAdminPrivilege(nsId, agentGroupId);
+  return (await isMember(nsId, agentGroupId)) || (await hasAdminPrivilege(nsId, agentGroupId));
 }
 
 /** Append a downvoted (input, output) case for human promotion into golden.jsonl. */
@@ -71,12 +71,12 @@ async function handleReaction(reaction: InboundReaction): Promise<void> {
   }
 
   const folder = agentMsg.group_slug;
-  const group = folder ? getAgentGroupByFolder(folder) : undefined;
+  const group = folder ? await getAgentGroupByFolder(folder) : undefined;
   if (!group) {
     log.debug('Feedback: reacted message has no resolvable agent group, ignored', { folder });
     return;
   }
-  if (!isKnownReactor(reaction, group.id)) {
+  if (!(await isKnownReactor(reaction, group.id))) {
     log.debug('Feedback: reaction from unknown user, ignored (sender_scope=known)', {
       channelType: reaction.channelType,
       group: folder,
