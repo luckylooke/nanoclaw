@@ -124,12 +124,12 @@ describe('composeGroupClaudeMd scheduling instructions (ncl tasks reach-in)', ()
 });
 
 describe('composeGroupClaudeMd memory imports', () => {
-  it('imports the memory index LAST, after the shared base and fragments', () => {
+  it('imports the memory index LAST, after the shared base and fragments', async () => {
     const ag = group('ag-mem', 'mem');
-    seed(ag);
+    await seed(ag);
     writeMemory('mem', 'memory/index.md', '# Memory Index');
 
-    composeGroupClaudeMd(ag);
+    await composeGroupClaudeMd(ag);
     const imports = importsOf(ag.folder);
 
     // Memory is the most volatile part of the prompt, so it must sit after the
@@ -139,26 +139,26 @@ describe('composeGroupClaudeMd memory imports', () => {
     expect(imports.indexOf('@./.claude-shared.md')).toBeLessThan(imports.indexOf('@./memory/index.md'));
   });
 
-  it('does NOT import the format contract — the index links to it instead', () => {
+  it('does NOT import the format contract — the index links to it instead', async () => {
     // memory/system/definition.md is ~1.4k tokens of "how to write a memory
     // file". That is needed when writing memory, which is occasional; paying for
     // it on every turn is the frequency-of-use mistake this whole layout exists
     // to avoid. The index carries a link to it.
     const ag = group('ag-mem-contract', 'mem-contract');
-    seed(ag);
+    await seed(ag);
     writeMemory('mem-contract', 'memory/index.md', '# Memory Index');
     writeMemory('mem-contract', 'memory/system/definition.md', '# Memory System');
 
-    composeGroupClaudeMd(ag);
+    await composeGroupClaudeMd(ag);
     const imports = importsOf(ag.folder);
     expect(imports).toContain('@./memory/index.md');
     expect(imports).not.toContain('@./memory/system/definition.md');
   });
 
-  it('is inert for a group with no memory directory', () => {
+  it('is inert for a group with no memory directory', async () => {
     const bare = group('ag-no-mem', 'no-mem');
-    seed(bare);
-    composeGroupClaudeMd(bare);
+    await seed(bare);
+    await composeGroupClaudeMd(bare);
     expect(importsOf(bare.folder).some((i) => i.startsWith('@./memory/'))).toBe(false);
   });
 });
