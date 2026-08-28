@@ -8,7 +8,7 @@
  * This fork installs the native credential proxy and NOT upstream's OneCLI
  * provider. That is the reason the fork exists: OneCLI is a third party on the
  * credential path. See spec/fork-features.yaml, feature `credential-proxy`,
- * whose invariant fails the build if `registerGatewayProvider('onecli'` reappears
- * anywhere in the tree.
+ * whose invariant fails the build if upstream's OneCLI provider is ever
+ * re-registered anywhere in the tree.
  */
 import './credential-proxy.js';
