@@ -1,52 +1,20 @@
-## Self-modification tools (require admin approval)
+## When something you do needs admin approval
 
-Three fire-and-forget tools change your container image or config. Each sends an approval card to an admin's DM; you get notified via system chat on approve/reject.
+Some actions cannot be applied directly — they go to an admin as a card in their DM, and you
+are told the outcome via system chat.
 
-### install_packages
+The tools that work this way are documented where they live, in
+`src/modules/self-mod/agent.md`: `install_packages` and `add_mcp_server`. This module is the
+approval machinery behind them, not a tool you call.
 
-Add apt and/or npm packages to your container image. On approval, the config is updated AND the image is rebuilt in the same step — you'll get a follow-up prompt ~5s after rebuild telling you to verify the packages are available.
+### What that means for your turn
 
-```
-install_packages({
-  apt: ["ripgrep", "jq"],              // names only, no version specs or flags
-  npm: ["@anthropic-ai/sdk"],          // global install
-  reason: "need rg for fast code search"
-})
-```
+You will **not** see the admin's response in the turn that asked for it. Approval is
+fire-and-forget: the request is queued, your turn ends, and the answer arrives later.
 
-- Max 20 packages per request.
-- Names must match strict regex (blocks shell injection via `vim; curl evil.com`).
-- On approval, the image rebuild and container restart happen automatically — there is no separate rebuild step for you to trigger.
-
-### add_mcp_server
-
-Wire an EXISTING third-party MCP server into your runtime config. Use either a local `command` with optional `args`/`env`, or a remote HTTPS Streamable HTTP `url`.
-
-```
-add_mcp_server({
-  name: "github",
-  command: "npx",
-  args: ["@modelcontextprotocol/server-github"],
-  env: { GITHUB_TOKEN: "onecli-managed" }
-})
-```
-
-```
-add_mcp_server({
-  name: "remote",
-  url: "https://example.com/mcp"
-})
-```
-
-- Does NOT install packages. Use `install_packages` first if the command isn't already available.
-- On approval, the container is killed and the next message wakes it with the new server wired up. No image rebuild — bun runs TS directly.
-
-### How approval works
-
-You won't see the admin's response in your current turn. After approval, the container is killed and next time a message arrives your container starts fresh on the new image. If a follow-up system prompt fires (as with `install_packages`), you'll see it and should act on it — verify the change, report to the user.
-
-If denied, you'll get a chat message telling you the request was rejected. Do not retry automatically; explain to the user what was denied.
-
-## Credential approvals (OneCLI)
-
-When you call an external API that requires credentials, OneCLI may prompt an admin for approval before releasing the token. This happens transparently: the HTTP call blocks until admin approves or denies. No action needed from you — just make the call. If it errors out with a credential failure, tell the user and stop.
+- **Approved.** The change is applied — which for `install_packages` means the image is
+  rebuilt and your container restarted. If a follow-up system prompt fires, act on it: verify
+  the change actually took effect, then report to the user.
+- **Rejected.** You get a chat message saying so, sometimes with a reason the admin typed.
+  Do not retry automatically — explain to the user what was denied.
+- **No answer.** A ghosted request is finalized as a rejection once it times out.
