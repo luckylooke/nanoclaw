@@ -7,8 +7,6 @@ import { createHash } from 'crypto';
 import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 
-import type Database from 'better-sqlite3';
-
 import { GROUPS_DIR } from './config.js';
 import {
   getRunningSessions,
@@ -28,14 +26,6 @@ import {
 import { runGuarded, type DeliveryGuardSpec, type GuardedDeliveryHandler } from './delivery-guard.js';
 import { isUnguarded, type Unguarded } from './guard/index.js';
 import { fanOutboundMessage } from './modules/cross-session-context/index.js';
-import {
-  getDueOutboundMessages,
-  getDeliveredIds,
-  getInboundContentById,
-  markDelivered,
-  markDeliveryFailed,
-  migrateDeliveredTable,
-} from './db/session-db.js';
 import { recordAgentMessage } from './gateway-db.js';
 import { log } from './log.js';
 import { normalizeOptions } from './channels/ask-question.js';
@@ -490,9 +480,9 @@ async function deliverMessage(
   // replies (a returned platform id + non-empty text); edits, reactions,
   // cards and ask_question cards are skipped. Best-effort — never blocks
   // the delivery path (marking delivered must still happen).
-  if (platformMsgId && msg.channel_type && msg.platform_id) {
+  if (platformMsgId && msg.channelType && msg.platformId) {
     try {
-      recordReplyForFeedback(platformMsgId, msg, content, session, inDb);
+      await recordReplyForFeedback(platformMsgId, msg, content, session);
     } catch (err) {
       log.warn('Feedback index: recordReply failed', { id: msg.id, err: String(err) });
     }
@@ -518,33 +508,36 @@ function extractText(content: unknown): string | null {
  * `content` is the already-parsed outbound message. Skips non-text payloads
  * (edits/reactions/cards) so only genuine agent answers are indexed.
  */
-function recordReplyForFeedback(
+async function recordReplyForFeedback(
   platformMsgId: string,
-  msg: { channel_type: string | null; platform_id: string | null; in_reply_to: string | null },
+  msg: { channelType: string | null; platformId: string | null; inReplyTo: string | null },
   content: Record<string, unknown>,
   session: Session,
-  inDb: Database.Database,
-): void {
+): Promise<void> {
   if (content.operation === 'edit' || content.operation === 'reaction') return;
   if (content.type === 'ask_question' || content.type === 'card') return;
   const outputText = extractText(content);
   if (!outputText) return; // files-only / empty — nothing worth capturing
 
-  // The triggering user turn, if this reply carries an in_reply_to link.
+  // The triggering user turn, if this reply carries an inReplyTo link. Read
+  // through the mailbox seam — the caller holds no session on this key.
   let inputText: string | null = null;
-  if (msg.in_reply_to) {
+  const inReplyTo = msg.inReplyTo;
+  if (inReplyTo) {
     try {
-      const raw = getInboundContentById(inDb, msg.in_reply_to);
+      const raw = await withExistingMailboxSession(session.agent_group_id, session.id, (mailbox) =>
+        mailbox.getInboundContentById(inReplyTo),
+      );
       inputText = raw ? extractText(JSON.parse(raw)) : null;
     } catch {
       inputText = null;
     }
   }
 
-  const group = getAgentGroup(session.agent_group_id);
+  const group = await getAgentGroup(session.agent_group_id);
   recordAgentMessage({
-    channel_type: msg.channel_type,
-    platform_id: msg.platform_id,
+    channel_type: msg.channelType,
+    platform_id: msg.platformId,
     message_ts: platformMsgId,
     group_slug: group?.folder ?? null,
     session_id: session.id,
