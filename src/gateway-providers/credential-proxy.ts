@@ -21,12 +21,7 @@
  * `gatewayEnv` is pure and exported so the invariants can be asserted without a
  * database or a spawn — the same move 880c6e26 made for the mount policy.
  */
-import {
-  CREDENTIAL_PROXY_PORT,
-  EGRESS_PROXY_ENABLED,
-  EGRESS_PROXY_PORT,
-  OTEL_COLLECTOR_PORT,
-} from '../config.js';
+import { CREDENTIAL_PROXY_PORT, EGRESS_PROXY_ENABLED, EGRESS_PROXY_PORT, OTEL_COLLECTOR_PORT } from '../config.js';
 import fs from 'fs';
 import path from 'path';
 
