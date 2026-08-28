@@ -26,7 +26,6 @@ import {
 } from './config.js';
 import { CONTAINER_PLUGINS_DIR, CONTAINER_TOOL_PROXY_SOCK_DIR, materializeContainerJson } from './container-config.js';
 import { classifyComplexity, tuningForTier, DEFAULT_STATIC_WINDOW } from './complexity-tier.js';
-import { getLatestTriggerText } from './db/session-db.js';
 import { getContainerConfig } from './db/container-configs.js';
 import { updateContainerConfigScalars } from './db/container-configs.js';
 import { CONTAINER_RUNTIME_BIN } from './container-runtime.js';
@@ -58,8 +57,8 @@ import {
   markContainerRunning,
   markContainerStopped,
   sessionContextPath,
-  openInboundDb,
   sessionDir,
+  withExistingMailboxSession,
   writeSessionContext,
   writeSessionRouting,
 } from './session-manager.js';
@@ -177,8 +176,8 @@ async function spawnContainer(session: Session): Promise<void> {
   const mailbox = getAgentMailbox();
   writeSessionContext(agentGroup.id, session.id, await mailbox.runnerContext(mailboxKey));
 
-  const configRow = getContainerConfig(agentGroup.id);
-  const { compactWindow, effortOverride } = resolveAdaptiveTuning(agentGroup.id, session.id, configRow);
+  const configRow = await getContainerConfig(agentGroup.id);
+  const { compactWindow, effortOverride } = await resolveAdaptiveTuning(agentGroup.id, session.id, configRow);
 
   // Materialize container.json from DB — writes fresh file and returns
   // the config object, threaded through provider resolution, buildMounts,
@@ -263,6 +262,35 @@ async function spawnContainer(session: Session): Promise<void> {
     }
     throw err;
   }
+}
+
+/**
+ * Adaptive per-spawn tuning: read the session's latest trigger message and
+ * classify it into a complexity tier, mapping to a compact-window + effort
+ * pair. Falls back to the DB-configured compact_window (or the static
+ * default) when there's no inbound text signal to classify. See
+ * complexity-tier.ts.
+ *
+ * Reads through the mailbox seam: upstream v2.3.0 replaced the direct
+ * openInboundDb() handle with MailboxSession, so the trigger-text read is a
+ * mailbox method rather than a SQL query issued from here.
+ */
+async function resolveAdaptiveTuning(
+  agentGroupId: string,
+  sessionId: string,
+  configRow: ContainerConfigRow | undefined,
+): Promise<{ compactWindow: number; effortOverride?: string }> {
+  let text: string | null | undefined;
+  try {
+    text = await withExistingMailboxSession(agentGroupId, sessionId, (mailbox) => mailbox.getLatestTriggerText());
+  } catch (err) {
+    log.debug('Adaptive tuning: failed to read inbound text', { sessionId, err });
+  }
+  if (!text || text.trim().length === 0) {
+    return { compactWindow: configRow?.compact_window ?? DEFAULT_STATIC_WINDOW };
+  }
+  const tuning = tuningForTier(classifyComplexity(text));
+  return { compactWindow: tuning.window, effortOverride: tuning.effort };
 }
 
 /**
@@ -555,7 +583,7 @@ function posixDirname(p: string): string {
   return i <= 0 ? '/' : p.slice(0, i);
 }
 
-export function buildMounts(
+export async function buildMounts(
   agentGroup: AgentGroup,
   session: Session,
   containerConfig: import('./container-config.js').ContainerConfig,
