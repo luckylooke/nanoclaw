@@ -1,8 +1,9 @@
+import { spawn } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { createRequire } from 'module';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 
 /**
  * health-monitor's alerting, driven against the outage it failed to report.
@@ -444,5 +445,136 @@ describe.skipIf(!present)('health-monitor — escalation to a DM', () => {
     // Long enough to pass the 6-hour warning re-nag, so re-nags DO happen here.
     expect(posts.filter((p) => p.kind === 'renag').length).toBeGreaterThan(0);
     expect(posts.some((p) => p.escalate)).toBe(false);
+  });
+});
+
+/**
+ * host-cli-responsive — the check that asks whether the host SERVES, not
+ * whether it exists.
+ *
+ * Every other liveness check can pass while nobody is being helped.
+ * `nanoclaw-service` asks systemd whether a process exists, and systemd
+ * reported `active` on all 28 ticks of the 2026-08-29 outage because a restart
+ * loop is "active" between crashes. The port checks are stronger but a TCP
+ * connect is completed by the kernel from the listen backlog, so a process with
+ * a wedged event loop accepts connections it will never answer — which is the
+ * fixture below, and the case no existing check could see.
+ *
+ * The fixture servers run as CHILD PROCESSES on purpose: cliProbe is
+ * synchronous, so a server in this process could never accept the connection
+ * while the main thread is blocked inside execFileSync.
+ */
+const SERVERS: Record<string, string> = {
+  ok: "require('net').createServer(c=>{c.on('data',()=>c.write(JSON.stringify({id:'x',ok:true,data:[]})+'\\n'))}).listen(process.env.S)",
+  wedge: "require('net').createServer(()=>{}).listen(process.env.S)",
+  reject:
+    "require('net').createServer(c=>{c.on('data',()=>c.write(JSON.stringify({id:'x',ok:false,error:{code:'unknown-command',message:'no'}})+'\\n'))}).listen(process.env.S)",
+  garbage: "require('net').createServer(c=>{c.on('data',()=>c.write('not json\\n'))}).listen(process.env.S)",
+};
+
+interface Probe {
+  cliProbe: (sock: string, timeoutMs: number) => Record<string, unknown>;
+  cliProbeVerdict: (r: Record<string, unknown>, sock: string, timeoutMs: number) => { ok: boolean; detail: string };
+}
+const probe = hm as unknown as Probe;
+
+describe.skipIf(!present)('health-monitor — host-cli-responsive', () => {
+  let child: ReturnType<typeof spawn> | null = null;
+  let sock = '';
+
+  async function serve(kind: keyof typeof SERVERS): Promise<void> {
+    sock = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'hm-sock-')), 's.sock');
+    child = spawn(process.execPath, ['-e', SERVERS[kind]], { env: { ...process.env, S: sock } });
+    for (let i = 0; i < 100 && !fs.existsSync(sock); i++) await new Promise((r) => setTimeout(r, 20));
+  }
+
+  afterEach(() => {
+    if (child) child.kill();
+    child = null;
+  });
+
+  it('passes when the host answers a real command', async () => {
+    await serve('ok');
+    const v = probe.cliProbeVerdict(probe.cliProbe(sock, 2000), sock, 2000);
+    expect(v.ok).toBe(true);
+    expect(v.detail).toMatch(/answered groups-list/);
+  });
+
+  it('fails when the socket is absent — the host is not running', () => {
+    const missing = path.join(os.tmpdir(), 'hm-definitely-absent.sock');
+    const v = probe.cliProbeVerdict(probe.cliProbe(missing, 1000), missing, 1000);
+    expect(v.ok).toBe(false);
+    expect(v.detail).toMatch(/does not exist/);
+  });
+
+  it('fails when the host accepts but never answers — the case nothing else catches', async () => {
+    await serve('wedge');
+    const v = probe.cliProbeVerdict(probe.cliProbe(sock, 800), sock, 800);
+    expect(v.ok).toBe(false);
+    expect(v.detail).toMatch(/did not answer/);
+    // The point of the whole check: an accept-level probe is satisfied here.
+    expect(fs.existsSync(sock)).toBe(true);
+  });
+
+  it('fails when the host answers but rejects the command', async () => {
+    await serve('reject');
+    const v = probe.cliProbeVerdict(probe.cliProbe(sock, 2000), sock, 2000);
+    expect(v.ok).toBe(false);
+    expect(v.detail).toMatch(/did not serve a read-only command/);
+  });
+
+  it('fails on a malformed response rather than reading it as healthy', async () => {
+    await serve('garbage');
+    const v = probe.cliProbeVerdict(probe.cliProbe(sock, 2000), sock, 2000);
+    expect(v.ok).toBe(false);
+  });
+});
+
+/**
+ * agent-turn-fresh — the daily paid probe's verdict.
+ *
+ * `chat-answered` was meant to be the catch-all symptom check, and during the
+ * 2026-08-29 outage it had nothing to detect: Saturday morning, nobody had
+ * written, so no message could sit unanswered for the whole 2.5 hours. A system
+ * observable only while someone is talking to it is unobservable exactly when
+ * it is quietest. One trivial scheduled turn a day supplies the traffic.
+ */
+const STALE_H = 26;
+interface Turn {
+  agentTurnVerdict: (newestMs: number, nowMs: number, staleH: number) => { ok: boolean; ageH: number | null };
+}
+const turn = hm as unknown as Turn;
+const NOW = Date.parse('2026-08-29T16:00:00Z');
+const hoursAgo = (h: number) => NOW - h * 3_600_000;
+
+describe.skipIf(!present)('health-monitor — agent-turn-fresh', () => {
+  it('passes while the daily probe is answering', () => {
+    expect(turn.agentTurnVerdict(hoursAgo(1), NOW, STALE_H).ok).toBe(true);
+    expect(turn.agentTurnVerdict(hoursAgo(23.9), NOW, STALE_H).ok).toBe(true);
+  });
+
+  it('tolerates a late run inside the grace window', () => {
+    // Daily cadence plus 2h, so a probe that fires late is not an outage.
+    expect(turn.agentTurnVerdict(hoursAgo(25.9), NOW, STALE_H).ok).toBe(true);
+  });
+
+  it('fails once a whole day has passed with no answer', () => {
+    const v = turn.agentTurnVerdict(hoursAgo(26.1), NOW, STALE_H);
+    expect(v.ok).toBe(false);
+    expect(v.ageH).toBeGreaterThan(26);
+  });
+
+  it('fails when nothing has ever answered', () => {
+    const v = turn.agentTurnVerdict(0, NOW, STALE_H);
+    expect(v.ok).toBe(false);
+    expect(v.ageH).toBeNull();
+  });
+
+  it('would have caught the 2026-08-03 outage on day one, not day three', () => {
+    // Containers died at startup for three days while every other check was
+    // green. With a daily probe the first missed answer trips inside ~26h.
+    const outageStart = Date.parse('2026-08-03T12:00:00Z');
+    const dayOne = outageStart + 26.5 * 3_600_000;
+    expect(turn.agentTurnVerdict(outageStart, dayOne, STALE_H).ok).toBe(false);
   });
 });
