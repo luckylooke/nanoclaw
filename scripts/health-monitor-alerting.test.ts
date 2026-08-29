@@ -578,3 +578,80 @@ describe.skipIf(!present)('health-monitor — agent-turn-fresh', () => {
     expect(turn.agentTurnVerdict(outageStart, dayOne, STALE_H).ok).toBe(false);
   });
 });
+
+/**
+ * crash-loop-backoff — the loop as the host itself records it.
+ *
+ * enforceStartupBackoff() sleeps INSIDE the process before the tripwire runs
+ * (0s, 10s, 30s, 2m, 5m, capped at 15m), so during a crash loop the unit is
+ * genuinely `active` for fifteen minutes at a stretch. That is why
+ * nanoclaw-service reported active on all 28 ticks of 2026-08-29, and why
+ * systemd's StartLimitBurst=5-over-10s can never fire: the breaker's own
+ * backoff is what defeats systemd's rate limiter. It caps without ever giving
+ * up, so the loop does not end on its own — this one ran 2.5h until a human
+ * stopped it.
+ */
+const BACKOFF_S = [0, 0, 10, 30, 120, 300, 900];
+const MIN_ATTEMPT = 3;
+const FRESH_MIN = 60;
+interface Breaker {
+  breakerVerdict: (
+    state: unknown,
+    nowMs: number,
+    minAttempt: number,
+    freshMin: number,
+    backoff: number[],
+  ) => { ok: boolean; attempt: number; stale?: boolean; delayS?: number; resumeMs?: number };
+}
+const brk = hm as unknown as Breaker;
+const cb = (attempt: number, minutesAgo: number) => ({
+  attempt,
+  timestamp: new Date(NOW - minutesAgo * 60_000).toISOString(),
+});
+const verdictOf = (state: unknown) => brk.breakerVerdict(state, NOW, MIN_ATTEMPT, FRESH_MIN, BACKOFF_S);
+
+describe.skipIf(!present)('health-monitor — crash-loop-backoff', () => {
+  it('is silent on a healthy start and on a clean shutdown', () => {
+    expect(verdictOf(cb(1, 200)).ok).toBe(true);
+    // resetCircuitBreaker() unlinks the file, so absence IS the healthy state.
+    expect(verdictOf(null).ok).toBe(true);
+  });
+
+  it('does not page for a single failed start', () => {
+    // Attempt 2 means one unclean previous run — a deploy blip, not a loop.
+    expect(verdictOf(cb(2, 1)).ok).toBe(true);
+  });
+
+  it('fires on two consecutive failed starts', () => {
+    const v = verdictOf(cb(3, 0));
+    expect(v.ok).toBe(false);
+    expect(v.delayS).toBe(10);
+  });
+
+  it('reports the capped backoff mid-incident', () => {
+    // Attempt 9, three minutes into a 15-minute wait — the 2026-08-29 shape.
+    const v = verdictOf(cb(9, 3));
+    expect(v.ok).toBe(false);
+    expect(v.delayS).toBe(900);
+    expect(v.resumeMs).toBe(NOW - 3 * 60_000 + 900_000);
+  });
+
+  it('treats a high attempt older than the reset window as history', () => {
+    // The breaker itself restarts at attempt 1 after an hour, so a stale file
+    // is not a live loop and must not page.
+    const v = verdictOf(cb(15, 4 * 60));
+    expect(v.ok).toBe(true);
+    expect(v.stale).toBe(true);
+  });
+
+  it('is a level, so consecutive ticks both fail and the debounce promotes it', () => {
+    // The failure mode that made the NRestarts check useless was intermittency.
+    // Through a 15-minute backoff every tick reads the same armed state.
+    for (const min of [0, 5, 10, 14]) expect(verdictOf(cb(9, min)).ok).toBe(false);
+  });
+
+  it('survives a garbage or half-written file without reading it as healthy panic', () => {
+    // Unparseable state reaches the verdict as null and must not page.
+    expect(verdictOf({ nonsense: true }).ok).toBe(true);
+  });
+});
