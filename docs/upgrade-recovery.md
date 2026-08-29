@@ -60,6 +60,17 @@ pnpm exec tsx scripts/upgrade-state.ts set
 
 That's the same thing `/setup`, `/update-nanoclaw`, and `/migrate-nanoclaw` do at the end. Do it only when the upgrade actually completed — the marker is your assertion that this install reached the current version through a path you trust.
 
+Then confirm the stamp actually happened, as the last step:
+
+```bash
+pnpm exec tsx scripts/upgrade-state.ts check
+```
+
+A commit landing after the stamp leaves the marker stale, and because the check
+that enforces it runs only at startup, the running host cannot notice. The
+install keeps working and then refuses to start at the next restart — which may
+be weeks later, on a reboot nobody connected to the commit that caused it.
+
 ## The override
 
 `pnpm exec tsx scripts/upgrade-state.ts set` is the override: it declares "this install is good at the current version." Use it when you know the install is actually in a good state (e.g. you completed the steps manually). It's safe to re-run.
@@ -69,3 +80,13 @@ To inspect the current marker:
 ```bash
 pnpm exec tsx scripts/upgrade-state.ts get
 ```
+
+To ask the startup gate's own question now, rather than finding out at the next
+restart:
+
+```bash
+pnpm exec tsx scripts/upgrade-state.ts check
+```
+
+It prints the recorded and running identities and exits non-zero when they
+differ — that is, when the tripwire is armed.
