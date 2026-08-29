@@ -655,3 +655,127 @@ describe.skipIf(!present)('health-monitor — crash-loop-backoff', () => {
     expect(verdictOf({ nonsense: true }).ok).toBe(true);
   });
 });
+
+/**
+ * spend-burn-rate / spend-vs-cap — the first checks here that watch money.
+ *
+ * Nothing watched spend until 2026-08-29, and the billing history says
+ * something should have: eval spent €57.19 on 2026-07-24 — more than its entire
+ * monthly cap — while it was still cap-exempt, and €40.58 across 5,489 calls on
+ * 2026-08-08. The worst single hour ever recorded is €16.14.
+ *
+ * Thresholds come from this box's own gateway.db rather than taste: the worst
+ * non-eval hour ever recorded is €4.28, so €6/h outside eval is a runaway
+ * rather than heavy use.
+ */
+const BURN_H = 6;
+const UNCAPPED_H = 1;
+const WARN_PCT = 80;
+const BUCKETS = [
+  { name: 'personal', capEur: 30, slugs: ['personal-assistant', 'learning', 'health', 'home', 'dm-with-ignac'] },
+  { name: 'dev', capEur: 300, slugs: ['dev-game', 'dev-web', 'admin'] },
+  { name: 'eval', capEur: 50, slugs: ['eval', 'eval-sandbox'] },
+];
+const CAPPED = new Set(BUCKETS.reduce<string[]>((a, b) => a.concat(b.slugs), []));
+
+interface Spend {
+  burnVerdict: (
+    spend: Array<{ slug: string; eur: number }>,
+    capped: Set<string>,
+    burnEurH: number,
+    uncappedEurH: number,
+  ) => { ok: boolean; hot: Array<{ slug: string; eur: number }>; nonEval: number };
+  capVerdict: (
+    spendBySlug: Record<string, number>,
+    buckets: typeof BUCKETS,
+    warnPct: number,
+  ) => { ok: boolean; over: Array<{ name: string; used: number; pct: number }>; uncapped: string[] };
+}
+const money = hm as unknown as Spend;
+const burn = (rows: Array<{ slug: string; eur: number }>) => money.burnVerdict(rows, CAPPED, BURN_H, UNCAPPED_H);
+
+describe.skipIf(!present)('health-monitor — spend-burn-rate', () => {
+  it('is quiet on a normal hour, and on no traffic at all', () => {
+    expect(burn([{ slug: 'admin', eur: 0.8 }]).ok).toBe(true);
+    expect(burn([]).ok).toBe(true);
+  });
+
+  it('ignores eval, which is bursty by design and separately capped', () => {
+    // A sweep legitimately spends more in an hour than everything else does in
+    // a month; eval has its own €50 bucket plus a €25/day guard.
+    expect(burn([{ slug: 'eval', eur: 16 }]).ok).toBe(true);
+    expect(burn([{ slug: 'eval-sandbox', eur: 20 }]).ok).toBe(true);
+  });
+
+  it('fires on a non-eval runaway', () => {
+    const v = burn([{ slug: 'admin', eur: 9 }]);
+    expect(v.ok).toBe(false);
+    expect(v.nonEval).toBe(9);
+  });
+
+  it('holds the threshold exactly where the evidence put it', () => {
+    // €4.28 is the worst non-eval hour ever seen here, so €6 must still pass.
+    expect(burn([{ slug: 'admin', eur: 4.28 }]).ok).toBe(true);
+    expect(burn([{ slug: 'admin', eur: BURN_H }]).ok).toBe(true);
+    expect(burn([{ slug: 'admin', eur: BURN_H + 0.01 }]).ok).toBe(false);
+  });
+
+  it('sums across groups rather than judging each alone', () => {
+    // Four groups at €2 each is a runaway even though no single one looks odd.
+    expect(burn([
+      { slug: 'admin', eur: 2 }, { slug: 'home', eur: 2 },
+      { slug: 'health', eur: 2 }, { slug: 'dev-web', eur: 2 },
+    ]).ok).toBe(false);
+  });
+
+  it('holds an uncapped slug to a far lower bar, since nothing else will stop it', () => {
+    // The tool-proxy fails OPEN on a slug it does not recognise.
+    const v = burn([{ slug: 'rag', eur: 1.5 }]);
+    expect(v.ok).toBe(false);
+    expect(v.hot.map((h) => h.slug)).toEqual(['rag']);
+    expect(burn([{ slug: 'rag', eur: 0.5 }]).ok).toBe(true);
+  });
+
+  it('catches an uncapped loop long before the total would notice', () => {
+    // €1.50 is nowhere near the €6 total bar — the uncapped rule is what fires.
+    const v = burn([{ slug: 'ping-test', eur: 1.5 }]);
+    expect(v.ok).toBe(false);
+    expect(v.nonEval).toBeLessThan(BURN_H);
+  });
+
+  it('does not apply the uncapped bar to a capped group', () => {
+    // admin at €1.50 is inside the dev bucket and well under the total.
+    const v = burn([{ slug: 'admin', eur: 1.5 }]);
+    expect(v.ok).toBe(true);
+    expect(v.hot).toEqual([]);
+  });
+});
+
+describe.skipIf(!present)('health-monitor — spend-vs-cap', () => {
+  it('reproduces the live reading that prompted the check', () => {
+    // eval stood at €43.78 of its €50 cap when this was written.
+    const v = money.capVerdict({ eval: 43.78 }, BUCKETS, WARN_PCT);
+    expect(v.ok).toBe(false);
+    expect(Math.round(v.over[0].pct)).toBe(88);
+    expect(v.over[0].name).toBe('eval');
+  });
+
+  it('stays quiet below the warning line', () => {
+    expect(money.capVerdict({ eval: 39 }, BUCKETS, WARN_PCT).ok).toBe(true);
+    expect(money.capVerdict({}, BUCKETS, WARN_PCT).ok).toBe(true);
+  });
+
+  it('sums a bucket across all its groups', () => {
+    // No single group is near the cap; the personal bucket is at 83%.
+    const v = money.capVerdict({ home: 10, health: 9, learning: 6 }, BUCKETS, WARN_PCT);
+    expect(v.ok).toBe(false);
+    expect(v.over[0].name).toBe('personal');
+  });
+
+  it('names groups that are spending with no cap at all', () => {
+    const v = money.capVerdict({ rag: 0.23, 'ping-test': 0.07, admin: 5, unused: 0 }, BUCKETS, WARN_PCT);
+    expect(v.uncapped.sort()).toEqual(['ping-test', 'rag']);
+    // Uncapped spend is reported, but on its own it is not a cap breach.
+    expect(v.over).toEqual([]);
+  });
+});
