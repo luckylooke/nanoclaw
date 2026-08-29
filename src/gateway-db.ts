@@ -82,7 +82,7 @@ export type Bucket = 'personal' | 'dev' | 'eval';
 
 // group `folder` slug → budget bucket. No such mapping exists elsewhere in the
 // codebase; this is the single source of truth. Unlisted slugs (e.g.
-// `_ping-test`, `dm-with-ignac` test group is listed, anything unknown) are
+// `ping-test`, `dm-with-ignac` test group is listed, anything unknown) are
 // uncapped (fail-open) so a missing/typo'd header can never brick an agent.
 const GROUP_BUCKET: Record<string, Bucket> = {
   'dev-game': 'dev',
