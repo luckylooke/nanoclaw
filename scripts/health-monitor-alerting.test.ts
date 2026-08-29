@@ -48,6 +48,7 @@ interface Decision {
   pendingNames: string[];
   status: string;
   alertKind: string | null;
+  escalate: boolean;
 }
 interface Helpers {
   restartWindowVerdict: (
@@ -93,6 +94,7 @@ interface Post {
   at: string;
   kind: string;
   names: string[];
+  escalate: boolean;
 }
 
 /**
@@ -118,6 +120,7 @@ function replay(opts: {
     since: null,
     nrestarts: null,
     restartLog: [] as string[],
+    escalated: false,
   };
   const posts: Post[] = [];
 
@@ -141,7 +144,9 @@ function replay(opts: {
       ...(opts.also ? opts.also(t) : []),
     ];
     const d = hm.decideAlert(results, state, t, RE_ALERT_H, critMin);
-    if (d.alertKind) posts.push({ at: new Date(t).toISOString(), kind: d.alertKind, names: d.failNames });
+    if (d.alertKind) {
+      posts.push({ at: new Date(t).toISOString(), kind: d.alertKind, names: d.failNames, escalate: !!d.escalate });
+    }
 
     state = {
       nrestarts: n,
@@ -150,6 +155,7 @@ function replay(opts: {
       pendingFailing: d.pendingNames,
       since: d.failNames.length ? (state.since as string) || new Date(t).toISOString() : null,
       lastAlertAt: d.alertKind ? new Date(t).toISOString() : (state.lastAlertAt as string | null),
+      escalated: d.alertKind === 'recovery' ? false : state.escalated === true || !!d.escalate,
     };
   }
   return posts;
@@ -384,5 +390,59 @@ describe.skipIf(!present)('health-monitor — upgrade tripwire armed', () => {
     const armed = marker({ commit: 'b13416f4aaaaaaaa' });
     expect(verdict(armed, 20).ok).toBe(false);
     expect(verdict(armed, 25).ok).toBe(false);
+  });
+});
+
+/**
+ * Escalation. The 09:00 alert on 2026-08-29 was DELIVERED — health-monitor.log
+ * records `alert(new) delivered` and it named the crash loop — and the outage
+ * still ran another 2h20m before anyone saw it, found by chance in an unrelated
+ * `systemctl --user status`. Delivery was never the failure; attention was. So
+ * a critical that survives to its first re-nag also goes to a DM, which is a
+ * different notification from a bot post in a low-traffic ops channel.
+ */
+describe.skipIf(!present)('health-monitor — escalation to a DM', () => {
+  it('pages on the first re-nag, not on the first notice', () => {
+    const posts = replay({
+      restarts: REAL_RESTARTS,
+      from: '2026-08-29T08:50:00Z',
+      to: '2026-08-29T11:25:00Z',
+    });
+    expect(posts[0].escalate).toBe(false); // 09:00 — channel only
+    expect(at(posts.filter((p) => p.escalate))).toEqual(['09:30', '10:00', '10:30', '11:00']);
+  });
+
+  it('sends the all-clear to the same place it paged', () => {
+    const posts = replay({
+      restarts: REAL_RESTARTS,
+      from: '2026-08-29T08:50:00Z',
+      to: '2026-08-29T13:00:00Z',
+    });
+    const green = posts.filter((p) => p.kind === 'recovery');
+    expect(green).toHaveLength(1);
+    expect(green[0].escalate).toBe(true);
+  });
+
+  it('never DMs for a critical that clears before the re-nag', () => {
+    // Confirmed by the debounce, so it alerts — but gone well inside 30 min.
+    const brief = (tMs: number): Result[] => [
+      {
+        name: 'credproxy-port-3002',
+        ok: !(tMs >= Date.parse('2026-08-29T09:00:00Z') && tMs <= Date.parse('2026-08-29T09:10:00Z')),
+        severity: 'critical',
+      },
+    ];
+    const posts = replay({ restarts: [], from: '2026-08-29T08:30:00Z', to: '2026-08-29T10:30:00Z', also: brief });
+    expect(posts.some((p) => p.escalate)).toBe(false);
+    // ...and no all-clear DM either, since nobody was paged.
+    expect(posts.filter((p) => p.kind === 'recovery').every((p) => !p.escalate)).toBe(true);
+  });
+
+  it('never DMs for warnings, however long they last', () => {
+    const warn = (): Result[] => [{ name: 'egress-proxy-3128', ok: false, severity: 'warning' }];
+    const posts = replay({ restarts: [], from: '2026-08-29T08:30:00Z', to: '2026-08-29T20:00:00Z', also: warn });
+    // Long enough to pass the 6-hour warning re-nag, so re-nags DO happen here.
+    expect(posts.filter((p) => p.kind === 'renag').length).toBeGreaterThan(0);
+    expect(posts.some((p) => p.escalate)).toBe(false);
   });
 });
