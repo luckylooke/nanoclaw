@@ -671,6 +671,7 @@ describe.skipIf(!present)('health-monitor — crash-loop-backoff', () => {
 const BURN_H = 6;
 const UNCAPPED_H = 1;
 const WARN_PCT = 80;
+const UNCAPPED_MONTH = 5;
 const BUCKETS = [
   { name: 'personal', capEur: 30, slugs: ['personal-assistant', 'learning', 'health', 'home', 'dm-with-ignac'] },
   { name: 'dev', capEur: 300, slugs: ['dev-game', 'dev-web', 'admin'] },
@@ -689,10 +690,18 @@ interface Spend {
     spendBySlug: Record<string, number>,
     buckets: typeof BUCKETS,
     warnPct: number,
-  ) => { ok: boolean; over: Array<{ name: string; used: number; pct: number }>; uncapped: string[] };
+    uncappedEurMonth?: number,
+  ) => {
+    ok: boolean;
+    over: Array<{ name: string; used: number; pct: number }>;
+    uncapped: string[];
+    hotUncapped: Array<{ slug: string; eur: number }>;
+  };
 }
 const money = hm as unknown as Spend;
 const burn = (rows: Array<{ slug: string; eur: number }>) => money.burnVerdict(rows, CAPPED, BURN_H, UNCAPPED_H);
+const cap = (spendBySlug: Record<string, number>) =>
+  money.capVerdict(spendBySlug, BUCKETS, WARN_PCT, UNCAPPED_MONTH);
 
 describe.skipIf(!present)('health-monitor — spend-burn-rate', () => {
   it('is quiet on a normal hour, and on no traffic at all', () => {
@@ -754,28 +763,72 @@ describe.skipIf(!present)('health-monitor — spend-burn-rate', () => {
 describe.skipIf(!present)('health-monitor — spend-vs-cap', () => {
   it('reproduces the live reading that prompted the check', () => {
     // eval stood at €43.78 of its €50 cap when this was written.
-    const v = money.capVerdict({ eval: 43.78 }, BUCKETS, WARN_PCT);
+    const v = cap({ eval: 43.78 });
     expect(v.ok).toBe(false);
     expect(Math.round(v.over[0].pct)).toBe(88);
     expect(v.over[0].name).toBe('eval');
   });
 
   it('stays quiet below the warning line', () => {
-    expect(money.capVerdict({ eval: 39 }, BUCKETS, WARN_PCT).ok).toBe(true);
-    expect(money.capVerdict({}, BUCKETS, WARN_PCT).ok).toBe(true);
+    expect(cap({ eval: 39 }).ok).toBe(true);
+    expect(cap({}).ok).toBe(true);
   });
 
   it('sums a bucket across all its groups', () => {
     // No single group is near the cap; the personal bucket is at 83%.
-    const v = money.capVerdict({ home: 10, health: 9, learning: 6 }, BUCKETS, WARN_PCT);
+    const v = cap({ home: 10, health: 9, learning: 6 });
     expect(v.ok).toBe(false);
     expect(v.over[0].name).toBe('personal');
   });
 
   it('names groups that are spending with no cap at all', () => {
-    const v = money.capVerdict({ rag: 0.23, 'ping-test': 0.07, admin: 5, unused: 0 }, BUCKETS, WARN_PCT);
+    const v = cap({ rag: 0.23, 'ping-test': 0.07, admin: 5, unused: 0 });
     expect(v.uncapped.sort()).toEqual(['ping-test', 'rag']);
-    // Uncapped spend is reported, but on its own it is not a cap breach.
+    // Uncapped spend is reported, but on its own it is never a *cap* breach:
+    // there is no cap to breach. Whether it fails the check is the next case.
     expect(v.over).toEqual([]);
+  });
+
+  // The hole this closed on 2026-08-31. `ok` came from `over` alone, so the
+  // uncapped list — the case the check was written for, since the tool-proxy
+  // fails open on a slug it does not recognise — could not fail it, and the
+  // detail string it rode in prints only under --dry-run. spend-burn-rate did
+  // not cover it either: trips at €1/h, so €0.50/h sustained is ~€360/month
+  // that neither check could see.
+  it('fails on an uncapped slug past the monthly floor', () => {
+    const v = cap({ rag: 12, admin: 5 });
+    expect(v.ok).toBe(false);
+    expect(v.hotUncapped.map((h) => h.slug)).toEqual(['rag']);
+    expect(v.over).toEqual([]); // still not a cap breach — it is the second rule
+  });
+
+  it('holds the floor exactly where the evidence put it', () => {
+    expect(cap({ rag: 5 }).ok).toBe(true);
+    expect(cap({ rag: 5.01 }).ok).toBe(false);
+  });
+
+  it('stays silent on the uncapped spend that is deliberate', () => {
+    // ping-test is the daily liveness probe at ~€0.037/turn, and rag's largest
+    // month ever recorded here is €0.23. A check that is red every day of its
+    // life is the alert fatigue this file keeps deleting under other names.
+    const v = cap({ 'ping-test': 1.1, rag: 0.23 });
+    expect(v.ok).toBe(true);
+    expect(v.uncapped.sort()).toEqual(['ping-test', 'rag']);
+    expect(v.hotUncapped).toEqual([]);
+  });
+
+  it('does not apply the uncapped rule to a capped group at the same figure', () => {
+    // dev is €300, so admin at €12 is nowhere near its cap and has a guard.
+    expect(cap({ admin: 12 }).ok).toBe(true);
+    expect(cap({ rag: 12 }).ok).toBe(false);
+  });
+
+  it('omitting the floor keeps the old reported-but-never-fatal behaviour', () => {
+    // The production call site always passes it; a caller that forgets should
+    // degrade to the old noise, not to a check that fails forever.
+    const v = money.capVerdict({ rag: 999 }, BUCKETS, WARN_PCT);
+    expect(v.ok).toBe(true);
+    expect(v.uncapped).toEqual(['rag']);
+    expect(v.hotUncapped).toEqual([]);
   });
 });
