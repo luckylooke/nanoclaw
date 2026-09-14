@@ -9,6 +9,7 @@ import { clearContainerToolInFlight, setContainerToolInFlight } from '../db/cont
 import type { MemorySessionHookRegistration } from '../memory/session-hook.js';
 import { TIMEZONE, formatLocalStamp } from '../timezone.js';
 import { shimCwd } from './cwd-shim.js';
+import { createReviewGate } from './review-gate.js';
 import { registerProvider } from './provider-registry.js';
 import type {
   AgentProvider,
@@ -597,6 +598,10 @@ export class ClaudeProvider implements AgentProvider {
     const traceId = newTraceId();
     log(`trace ${traceId}`);
 
+    // The review board's deterministic gate (spec/review-board.md step F): one
+    // instance per turn, observes PostToolUse, blocks a premature Stop once.
+    const reviewGate = createReviewGate({ agentDir: '/workspace/agent' });
+
     const sdkResult = sdkQuery({
       prompt: stream,
       options: {
@@ -619,9 +624,10 @@ export class ClaudeProvider implements AgentProvider {
         mcpServers: this.mcpServers,
         hooks: {
           PreToolUse: [{ hooks: [preToolUseHook] }],
-          PostToolUse: [{ hooks: [postToolUseHook] }],
+          PostToolUse: [{ hooks: [postToolUseHook, reviewGate.postToolUse as HookCallback] }],
           PostToolUseFailure: [{ hooks: [postToolUseHook] }],
           PreCompact: [{ hooks: [createPreCompactHook(this.assistantName)] }],
+          Stop: [{ hooks: [reviewGate.stop as HookCallback] }],
         },
       },
     });
