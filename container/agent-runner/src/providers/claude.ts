@@ -23,6 +23,7 @@ import {
 // Transcript archiving and rotation are this provider's own concern: both
 // read the SDK's on-disk .jsonl, which no other provider has.
 import { archiveClaudeTranscript, rotateClaudeContinuation } from './claude-history.js';
+import { createReviewGate } from './review-gate.js';
 import { registerProvider } from './provider-registry.js';
 import type { AgentProvider, AgentQuery, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
 
@@ -315,6 +316,10 @@ export class ClaudeProvider implements AgentProvider {
     const traceId = newTraceId();
     log(`trace ${traceId}`);
 
+    // The review board's deterministic gate (spec/review-board.md step F): one
+    // instance per turn, observes PostToolUse, blocks a premature Stop once.
+    const reviewGate = createReviewGate({ agentDir: '/workspace/agent' });
+
     const sdkResult = sdkQuery({
       prompt: stream,
       options: {
@@ -352,9 +357,10 @@ export class ClaudeProvider implements AgentProvider {
         mcpServers: this.mcp.mcpServers,
         hooks: {
           PreToolUse: [{ hooks: [preToolUseHook] }],
-          PostToolUse: [{ hooks: [postToolUseHook] }],
+          PostToolUse: [{ hooks: [postToolUseHook, reviewGate.postToolUse as HookCallback] }],
           PostToolUseFailure: [{ hooks: [postToolUseHook] }],
           PreCompact: [{ hooks: [createPreCompactHook(this.assistantName)] }],
+          Stop: [{ hooks: [reviewGate.stop as HookCallback] }],
         },
       },
     });
