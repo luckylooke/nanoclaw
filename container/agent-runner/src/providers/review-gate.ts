@@ -30,8 +30,14 @@ export type GateOptions = {
    * /workspace/group (the image's WORKDIR). Default: both.
    */
   roots?: string[];
-  /** Injected clock for tests. */
+  /** Injected ordering clock for tests (monotonic ticks are enough). */
   now?: () => number;
+  /**
+   * Wall clock, epoch ms, used ONLY to compare against verdict-file timestamps.
+   * Kept apart from `now` on purpose: the first review of this file caught the two
+   * being mixed, which made the verdict-age check vacuous under the test clock.
+   */
+  wallNow?: () => number;
 };
 
 export type GateState = {
@@ -39,7 +45,8 @@ export type GateState = {
   lastCodeEditAt: number | null;
   lastChecksAt: number | null;
   lastReviewAt: number | null;
-  lastReviewDry: boolean;
+  /** Wall-clock ms of the last non-dry review run (for verdict age). */
+  lastReviewWallMs: number | null;
 };
 
 export type StopDecision =
@@ -74,33 +81,40 @@ export function classifyCommand(command: string): { checks: boolean; review: boo
   return { checks: CHECK_COMMAND.test(c), review, dry: review && /--dry\b/.test(c) };
 }
 
-/** Newest verdict file in <agentDir>/review, or null. Tolerates a missing dir and bad JSON. */
+/**
+ * Newest verdict in <agentDir>/review by its `ts` FIELD, or null. Not by filename
+ * order: the board names files `<ts>-<hash>.json`, which happens to sort, but a
+ * foreign or renamed file would win on name alone (found by the board's own first
+ * review of this file). Tolerates a missing dir, bad JSON and unrelated files.
+ */
 export function latestVerdict(agentDir: string): { verdict: string; round: number; rounds_cap: number; ts: number } | null {
   const dir = path.join(agentDir, 'review');
   let names: string[];
   try {
-    names = fs.readdirSync(dir).filter((f) => f.endsWith('.json')).sort();
+    names = fs.readdirSync(dir).filter((f) => f.endsWith('.json'));
   } catch {
     return null;
   }
-  for (let i = names.length - 1; i >= 0; i--) {
+  let best: { verdict: string; round: number; rounds_cap: number; ts: number } | null = null;
+  for (const name of names) {
     try {
-      const j = JSON.parse(fs.readFileSync(path.join(dir, names[i]), 'utf8')) as Record<string, unknown>;
+      const j = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8')) as Record<string, unknown>;
       const ts = Date.parse(String(j.ts ?? ''));
       if (typeof j.verdict !== 'string' || Number.isNaN(ts)) continue;
-      return { verdict: j.verdict, round: Number(j.round ?? 1), rounds_cap: Number(j.rounds_cap ?? 2), ts };
+      if (!best || ts > best.ts) best = { verdict: j.verdict, round: Number(j.round ?? 1), rounds_cap: Number(j.rounds_cap ?? 2), ts };
     } catch {
       /* skip a half-written or foreign file */
     }
   }
-  return null;
+  return best;
 }
 
 export function createReviewGate(opts: GateOptions = {}) {
   const agentDir = opts.agentDir ?? '/workspace/agent';
   const roots = opts.roots ?? [agentDir, '/workspace/group'];
   const now = opts.now ?? Date.now;
-  const state: GateState = { editedCodeFiles: new Map(), lastCodeEditAt: null, lastChecksAt: null, lastReviewAt: null, lastReviewDry: false };
+  const wallNow = opts.wallNow ?? Date.now;
+  const state: GateState = { editedCodeFiles: new Map(), lastCodeEditAt: null, lastChecksAt: null, lastReviewAt: null, lastReviewWallMs: null };
 
   function observeToolUse(toolName: string, toolInput: Record<string, unknown> | undefined): void {
     const t = now();
@@ -118,7 +132,7 @@ export function createReviewGate(opts: GateOptions = {}) {
       if (k.checks) state.lastChecksAt = t;
       if (k.review && !k.dry) {
         state.lastReviewAt = t;
-        state.lastReviewDry = false;
+        state.lastReviewWallMs = wallNow();
       }
     }
   }
@@ -138,7 +152,10 @@ export function createReviewGate(opts: GateOptions = {}) {
       missing.push('the review board has not run since your last edit: `node /workspace/extra/tool-exec.js review run --repo <repo> --task-text "<what was asked>"`');
     } else {
       const v = latestVerdict(agentDir);
-      if (v && v.verdict !== 'APPROVE' && v.round < v.rounds_cap && v.ts >= (state.lastReviewAt - 5 * 60_000)) {
+      // Only a verdict written by THIS turn's review run counts (within 5 min of it,
+      // both on the wall clock); an older CHANGES_REQUESTED is someone else's story.
+      const fresh = v != null && state.lastReviewWallMs != null && v.ts >= state.lastReviewWallMs - 5 * 60_000;
+      if (v && fresh && v.verdict !== 'APPROVE' && v.round < v.rounds_cap) {
         missing.push(`the last review verdict is ${v.verdict} at round ${v.round} of ${v.rounds_cap}: fix what a responsible maintainer would not ignore and run the board again — or, if you are stopping to ask Ctibor about it, say so explicitly with the blocking list`);
       }
     }
