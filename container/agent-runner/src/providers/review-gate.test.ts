@@ -135,6 +135,31 @@ describe('the stop decision', () => {
     expect(g.decideStop(false).decision).toBe('allow');
   });
 
+  it('a stale CHANGES_REQUESTED from an earlier session does not block (verdict age is on the wall clock)', () => {
+    const g = gate();
+    edit(g, 'web-workspace/framework/app/a.ts');
+    bash(g, 'pnpm test');
+    writeVerdict('CHANGES_REQUESTED', 1, new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString()); // 3h old
+    bash(g, 'node /workspace/extra/tool-exec.js review run --repo web-workspace/framework');
+    expect(g.decideStop(false).decision).toBe('allow');
+  });
+
+  it('verdict age uses the injected wall clock, not the ordering clock', () => {
+    let wall = Date.parse('2026-09-14T12:00:00Z');
+    const g = createReviewGate({ agentDir, now: tick, wallNow: () => wall });
+    edit(g, 'web-workspace/framework/app/a.ts');
+    bash(g, 'pnpm test');
+    writeVerdict('CHANGES_REQUESTED', 1, '2026-09-14T12:00:30Z');
+    bash(g, 'node /workspace/extra/tool-exec.js review run --repo web-workspace/framework');
+    expect(g.decideStop(false).decision).toBe('block');
+    wall = Date.parse('2026-09-14T18:00:00Z'); // hours later, same file → stale
+    const g2 = createReviewGate({ agentDir, now: tick, wallNow: () => wall });
+    edit(g2, 'web-workspace/framework/app/a.ts');
+    bash(g2, 'pnpm test');
+    bash(g2, 'node /workspace/extra/tool-exec.js review run --repo web-workspace/framework');
+    expect(g2.decideStop(false).decision).toBe('allow');
+  });
+
   it('latestVerdict tolerates a missing dir, garbage and foreign files, and picks the newest valid one', () => {
     expect(latestVerdict(agentDir)).toBeNull();
     fs.mkdirSync(path.join(agentDir, 'review'));
@@ -142,6 +167,9 @@ describe('the stop decision', () => {
     fs.writeFileSync(path.join(agentDir, 'review', '1-mid.json'), JSON.stringify({ ts: '2026-02-01T00:00:00Z', verdict: 'CHANGES_REQUESTED', round: 1, rounds_cap: 2 }));
     fs.writeFileSync(path.join(agentDir, 'review', '2-bad.json'), '{ not json');
     fs.writeFileSync(path.join(agentDir, 'review', '3-foreign.json'), JSON.stringify({ hello: 'world' }));
+    expect(latestVerdict(agentDir)?.verdict).toBe('CHANGES_REQUESTED');
+    // a file whose NAME sorts last but whose ts is oldest must not win
+    fs.writeFileSync(path.join(agentDir, 'review', 'zzz-renamed.json'), JSON.stringify({ ts: '2025-01-01T00:00:00Z', verdict: 'APPROVE', round: 1, rounds_cap: 2 }));
     expect(latestVerdict(agentDir)?.verdict).toBe('CHANGES_REQUESTED');
   });
 });
