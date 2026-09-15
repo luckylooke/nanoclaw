@@ -66,6 +66,10 @@ const WATCHED = [
   'tools/memory/memory-watch.js',
   'tools/dashboard/server.js',
   'tools/otel/collector.js',
+  // The forwarder that makes a dev server visible to the agent containers. It is
+  // silent when it works, and an agent whose screenshots stop resolving has no
+  // way to tell a dead bridge from a dead dev server.
+  'tools/devserver/bridge.js',
   'tool-proxy/daemon.js',
   'tool-proxy/tool-exec.js',
   // SEC-AI2: holds the shared bearer token host-side and stamps each call's
