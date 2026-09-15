@@ -5,28 +5,28 @@ description: Google Calendar CRUD. Use when the user asks about their schedule, 
 
 # Google Calendar
 
-Access Google Calendar via the `gcal` tool at `/workspace/agent/tools/gcal/gcal.js`.
+Access Google Calendar via the `gcal` tool at `/workspace/extra/tools/gcal/gcal.js`.
 
 ## Commands
 
 ```bash
 # List today's events
-node /workspace/agent/tools/gcal/gcal.js list
+node /workspace/extra/tools/gcal/gcal.js list
 
 # List events for a specific date
-node /workspace/agent/tools/gcal/gcal.js list 2026-06-01
+node /workspace/extra/tools/gcal/gcal.js list 2026-06-01
 
 # Create an event
-node /workspace/agent/tools/gcal/gcal.js create '{"summary":"Gym","start":{"dateTime":"2026-06-01T07:00:00+02:00","timeZone":"Europe/Bratislava"},"end":{"dateTime":"2026-06-01T08:00:00+02:00","timeZone":"Europe/Bratislava"}}'
+node /workspace/extra/tools/gcal/gcal.js create '{"summary":"Gym","start":{"dateTime":"2026-06-01T07:00:00+02:00","timeZone":"Europe/Bratislava"},"end":{"dateTime":"2026-06-01T08:00:00+02:00","timeZone":"Europe/Bratislava"}}'
 
 # Get a specific event
-node /workspace/agent/tools/gcal/gcal.js get <eventId>
+node /workspace/extra/tools/gcal/gcal.js get <eventId>
 
 # Update an event (partial update)
-node /workspace/agent/tools/gcal/gcal.js update <eventId> '{"summary":"New title"}'
+node /workspace/extra/tools/gcal/gcal.js update <eventId> '{"summary":"New title"}'
 
 # Delete an event
-node /workspace/agent/tools/gcal/gcal.js delete <eventId>
+node /workspace/extra/tools/gcal/gcal.js delete <eventId>
 ```
 
 ## Rules
