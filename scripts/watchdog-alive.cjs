@@ -70,6 +70,9 @@ const WATCHED = [
   // silent when it works, and an agent whose screenshots stop resolving has no
   // way to tell a dead bridge from a dead dev server.
   'tools/devserver/bridge.js',
+  // The Storybook launcher: it maps a systemd instance to a package directory,
+  // and a silent change to that mapping is a catalogue that starts the wrong one.
+  'tools/storybook/launch.js',
   'tool-proxy/daemon.js',
   'tool-proxy/tool-exec.js',
   // SEC-AI2: holds the shared bearer token host-side and stamps each call's
