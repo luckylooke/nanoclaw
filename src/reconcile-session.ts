@@ -269,11 +269,21 @@ async function enforceRunningContainerSla(
   if (decision.action === 'ok') return;
 
   if (decision.action === 'kill-ceiling') {
-    log.warn('Killing container past absolute ceiling', {
-      sessionId: session.id,
-      heartbeatAgeMs: decision.heartbeatAgeMs,
-      ceilingMs: decision.ceilingMs,
-    });
+    // With no claim open the container finished its turn and sat idle to the
+    // ceiling — the designed retirement path (every scheduled-task session
+    // ends this way, the liveness probe daily at 04:31), not a stuck
+    // container. A claim still open at the ceiling is the alarm; only that
+    // earns the error log. 52 of the last 52 entries there were the former.
+    const idle = gatedClaims.length === 0;
+    log[idle ? 'info' : 'warn'](
+      idle ? 'Retiring idle container at absolute ceiling' : 'Killing container past absolute ceiling',
+      {
+        sessionId: session.id,
+        heartbeatAgeMs: decision.heartbeatAgeMs,
+        ceilingMs: decision.ceilingMs,
+        openClaims: gatedClaims.length,
+      },
+    );
     killContainer(session.id, 'absolute-ceiling');
     resetStuckProcessingRows(inDb, outDb, session, 'absolute-ceiling');
     return;
