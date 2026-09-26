@@ -44,6 +44,13 @@ interface Price {
 // Order matters: first match wins.
 const PRICING: Array<{ match: string; price: Price }> = [
   { match: 'haiku', price: { input: 1.0, output: 5.0, cacheRead: 0.1, cacheWrite: 1.25 } },
+  // Before the generic 'sonnet' line, or Sonnet 5 is billed at Sonnet 4.6's
+  // rate — 1.5x too much, which would make a cheaper model look like a wash.
+  // Rates from platform.claude.com/docs/en/about-claude/pricing on 2026-09-26:
+  // the launch $2/$10 became the standard price. Note the newer tokenizer
+  // (Claude 4.7 and later) yields roughly 30% more tokens for the same text,
+  // so the saving per request is smaller than the per-token ratio suggests.
+  { match: 'sonnet-5', price: { input: 2.0, output: 10.0, cacheRead: 0.2, cacheWrite: 2.5 } },
   { match: 'sonnet', price: { input: 3.0, output: 15.0, cacheRead: 0.3, cacheWrite: 3.75 } },
   // Opus and Fable had no line at all, so their calls were logged at EUR 0 and
   // no budget cap could see them. Harmless while nothing called them; not once
@@ -95,10 +102,17 @@ export function computeCostEur(model: string | null, u: Usage): number {
 export type Bucket = 'personal' | 'dev' | 'eval';
 
 // group `folder` slug → budget bucket. No such mapping exists elsewhere in the
-// codebase; this is the single source of truth. Unlisted slugs (e.g.
-// `ping-test`, `dm-with-ignac` test group is listed, anything unknown) are
-// uncapped (fail-open) so a missing/typo'd header can never brick an agent.
+// codebase; this is the single source of truth. Unlisted slugs (anything
+// unknown, a typo'd header) are uncapped (fail-open) so a missing header can
+// never brick an agent — but every group that actually spawns belongs here,
+// or its spend is invisible to the caps and the gateway warns on every call.
 const GROUP_BUCKET: Record<string, Bucket> = {
+  // The daily liveness probe. Unlisted from 2026-05 to 2026-09-26: ~€0.04 a
+  // day (a 34k-token cache write for a one-word reply) billed to "uncapped"
+  // and a WARN in the error log every morning. Capped with the personal
+  // agents because that is the fleet it probes; if that bucket is spent, the
+  // probe failing is a true report, not a false alarm.
+  'ping-test': 'personal',
   'dev-game': 'dev',
   'dev-web': 'dev',
   admin: 'dev',
