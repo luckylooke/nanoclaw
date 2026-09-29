@@ -297,6 +297,7 @@ async function retryPendingAdoption(session: Session): Promise<boolean> {
       key: snapshot.handle.key,
       runtimeIdentity: gatewayRuntimeIdentity(snapshot.handle.key),
       groupName: group.name,
+      groupFolder: group.folder,
       containerName: snapshot.handle.name,
       capabilities: driver.capabilities(),
     });
@@ -409,6 +410,7 @@ async function spawnContainer(session: Session): Promise<void> {
       sessionId: session.id,
     }),
     groupName: agentGroup.name,
+    groupFolder: agentGroup.folder,
     containerName,
     capabilities: driver.capabilities(),
   });

@@ -14,6 +14,9 @@
  *
  * Runs on every container start, so editing a source still reaches every agent
  * on its next spawn.
+ *
+ * FORK: the group's memory index (`memory/index.md`) is inlined as the LAST
+ * section. See spec/fork-features.yaml, feature `claude-md-compose-memory`.
  */
 import { randomUUID } from 'crypto';
 import fs from 'fs';
@@ -150,6 +153,15 @@ const COMPOSED_HEADER =
 
 const BASE_DOC_SECTION = 'NanoClaw Runtime Contract';
 
+/**
+ * Fork: the section carrying the group's persistent memory index — the map of
+ * what the group knows and where. `memory/system/definition.md` claims the index
+ * is loaded whenever a context window is created; this section is what makes
+ * that claim true. Exported for the invariant test.
+ */
+export const MEMORY_INDEX_SECTION = 'Memory Index';
+const MEMORY_INDEX_FILE = path.join('memory', 'index.md');
+
 // Instruction docs that only teach `ncl`, and so are dead weight when the agent
 // has none: host dispatch rejects every cli_request at cli_scope=disabled, and
 // scheduling teaches `ncl tasks`.
@@ -245,9 +257,45 @@ export async function composeGroupProjectDoc(
     if (mcp.instructions) push(`MCP Server: ${name}`, mcp.instructions, true);
   }
 
+  // Fork: the memory index, LAST on purpose. Memory changes far more often than
+  // the runtime contract or the instruction set, and prompt caching is a prefix
+  // match — the volatile tail keeps everything before it cacheable. The format
+  // contract (memory/system/definition.md, ~1.4k tokens of how-to-write-a-memory
+  // -file) is deliberately NOT inlined: writing memory is occasional, and the
+  // index links to it. Droppable, so under the size cap the persona and the
+  // runtime contract outrank it.
+  const memoryIndex = readMemoryIndex(groupDir);
+  if (memoryIndex) push(MEMORY_INDEX_SECTION, memoryIndex, true);
+
   const content =
     spec.maxBytes === undefined ? render(sections) : fitToCap(sections, spec.maxBytes, spec.fileName, group.name);
   writeAtomic(path.join(groupDir, spec.fileName), content);
+}
+
+/**
+ * Fork: read the agent-authored memory index with the same discipline as
+ * `readGroupPersona` — O_NOFOLLOW, regular files only — because the group
+ * directory is writable from the container and a planted symlink would
+ * otherwise pull any host-readable file into the system prompt.
+ */
+function readMemoryIndex(groupDir: string): string | null {
+  const file = path.join(groupDir, MEMORY_INDEX_FILE);
+  let fd: number | undefined;
+  try {
+    fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    if (!fs.fstatSync(fd).isFile()) return null;
+    const content = fs.readFileSync(fd, 'utf-8').trim();
+    return content || null;
+  } catch (err) {
+    if (typeof err === 'object' && err !== null && 'code' in err && err.code === 'ENOENT') return null;
+    log.warn('Could not read the group memory index; omitting it', {
+      file,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
 }
 
 function block(section: ProjectDocSection): string {

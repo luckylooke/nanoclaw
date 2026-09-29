@@ -32,6 +32,12 @@ export interface GatewaySessionInput {
   runtimeIdentity: string;
   /** The agent group's display name, for gateways that register an agent identity. */
   groupName: string;
+  /**
+   * FORK: the agent group's folder — the label the credential proxy bills and
+   * budget-caps by (`x-agent-group`). Handed over here because a provider must
+   * not reach into the DB (gateway-provider-registry.test.ts enforces it).
+   */
+  groupFolder?: string;
   /** The runtime container this session runs in, as the driver named it; providers key per-session resources on it. */
   containerName: string;
   /**

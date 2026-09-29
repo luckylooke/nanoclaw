@@ -21,6 +21,7 @@ import {
   BASE_INSTRUCTIONS_PATH,
   composeGroupProjectDoc,
   DEFAULT_PROJECT_DOC,
+  MEMORY_INDEX_SECTION,
   MEMORY_NOTE_PLACEHOLDER,
   renderBaseInstructions,
   type ProjectDocSpec,
@@ -139,15 +140,21 @@ describe('composeGroupProjectDoc delivery', () => {
     expect(doc.split('\n').find((l) => l.startsWith('# '))).not.toBe('# Composed at spawn');
   });
 
-  it('never reads agent-authored files under the group directory except the persona', async () => {
+  // Fork: memory/index.md is the one other agent-authored file that is read —
+  // deliberately, see "memory index (fork)" below. Everything else stays out.
+  it('never reads agent-authored files under the group directory except the persona and the memory index', async () => {
     const ag = await seed('ag-memory', 'memory-group');
     const memoryDir = path.join(groupDirOf(ag.folder), 'memory');
-    fs.mkdirSync(memoryDir, { recursive: true });
-    fs.writeFileSync(path.join(memoryDir, 'index.md'), 'must not enter the project document');
+    fs.mkdirSync(path.join(memoryDir, 'system'), { recursive: true });
+    fs.writeFileSync(path.join(memoryDir, 'notes.md'), 'must not enter the project document');
+    fs.writeFileSync(path.join(memoryDir, 'system', 'definition.md'), 'nor must the format contract');
+    fs.writeFileSync(path.join(groupDirOf(ag.folder), 'scratch.md'), 'and neither must a stray file');
 
     const doc = await compose(ag);
 
     expect(doc).not.toContain('must not enter the project document');
+    expect(doc).not.toContain('nor must the format contract');
+    expect(doc).not.toContain('and neither must a stray file');
   });
 });
 
@@ -451,5 +458,63 @@ describe('composeGroupProjectDoc size cap', () => {
     expect(doc).not.toContain('# Omitted for size');
     expect(log.warn).toHaveBeenCalled();
     expect(log.error).not.toHaveBeenCalled();
+  });
+});
+
+describe('composeGroupProjectDoc memory index (fork)', () => {
+  function writeMemory(folder: string, rel: string, text: string): void {
+    const file = path.join(groupDirOf(folder), rel);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, text);
+  }
+
+  it('inlines memory/index.md LAST, after the runtime contract and every other section', async () => {
+    const ag = await seed('ag-mem', 'mem');
+    writeMemory(ag.folder, 'memory/index.md', '## Map\n\n- [Thing](thing.md)');
+
+    const doc = await compose(ag);
+
+    // Memory is the most volatile part of the prompt and caching is a prefix
+    // match: everything before the volatile tail stays cacheable.
+    const sections = [...doc.matchAll(/^# (.+)$/gm)].map((m) => m[1]);
+    expect(sections.at(-1)).toBe(MEMORY_INDEX_SECTION);
+    expect(doc.indexOf('# NanoClaw Runtime Contract')).toBeLessThan(doc.indexOf(`# ${MEMORY_INDEX_SECTION}`));
+    expect(doc).toContain('- [Thing](thing.md)');
+  });
+
+  it('does NOT inline the format contract — the index links to it instead', async () => {
+    // memory/system/definition.md is ~1.4k tokens of "how to write a memory
+    // file": needed when writing memory, which is occasional. Paying for it on
+    // every turn is the frequency-of-use mistake this layout exists to avoid.
+    const ag = await seed('ag-mem-contract', 'mem-contract');
+    writeMemory(ag.folder, 'memory/index.md', 'See [the contract](system/definition.md).');
+    writeMemory(ag.folder, 'memory/system/definition.md', 'FORMAT CONTRACT BODY');
+
+    const doc = await compose(ag);
+
+    expect(doc).toContain('See [the contract](system/definition.md).');
+    expect(doc).not.toContain('FORMAT CONTRACT BODY');
+  });
+
+  it('is inert for a group with no memory directory', async () => {
+    const ag = await seed('ag-no-mem', 'no-mem');
+    const doc = await compose(ag);
+    expect(doc).not.toContain(`# ${MEMORY_INDEX_SECTION}`);
+  });
+
+  it('does not follow a symlink planted as the index', async () => {
+    // The group directory is writable from the container: a symlink at
+    // memory/index.md would otherwise pull any host-readable file into the prompt.
+    const ag = await seed('ag-mem-link', 'mem-link');
+    const outside = path.join(TEST_ROOT, 'outside.md');
+    fs.writeFileSync(outside, 'HOST FILE THAT MUST NOT ENTER THE PROMPT');
+    fs.mkdirSync(path.join(groupDirOf(ag.folder), 'memory'), { recursive: true });
+    fs.symlinkSync(outside, path.join(groupDirOf(ag.folder), 'memory', 'index.md'));
+
+    const doc = await compose(ag);
+
+    expect(doc).not.toContain('HOST FILE THAT MUST NOT ENTER THE PROMPT');
+    expect(doc).not.toContain(`# ${MEMORY_INDEX_SECTION}`);
+    expect(log.warn).toHaveBeenCalledWith('Could not read the group memory index; omitting it', expect.anything());
   });
 });
