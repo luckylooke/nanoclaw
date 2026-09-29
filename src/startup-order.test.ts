@@ -9,7 +9,14 @@ const state = vi.hoisted(() => ({
   ready: vi.fn(),
 }));
 vi.mock('./backfill-container-configs.js', () => ({ backfillContainerConfigs: vi.fn() }));
-vi.mock('./config.js', () => ({ CENTRAL_DB_PATH: ':memory:' }));
+// Fork: main() also reads the credential-proxy bind address and starts the proxy before the adapters.
+vi.mock('./config.js', () => ({
+  CENTRAL_DB_PATH: ':memory:',
+  DATA_DIR: '/tmp',
+  CREDENTIAL_PROXY_PORT: 0,
+  CREDENTIAL_PROXY_HOST: '127.0.0.1',
+}));
+vi.mock('./credential-proxy.js', () => ({ startCredentialProxy: async () => ({ close: vi.fn() }) }));
 vi.mock('./circuit-breaker.js', () => ({ enforceStartupBackoff: vi.fn(), resetCircuitBreaker: vi.fn() }));
 vi.mock('./upgrade-state.js', () => ({ enforceUpgradeTripwire: vi.fn() }));
 vi.mock('./db/connection.js', () => ({ initDb: async () => ({ dialect: 'sqlite' }), closeDb: vi.fn() }));

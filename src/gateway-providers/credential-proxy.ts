@@ -8,9 +8,12 @@
  * rewrite (a951e74b), so replaying the patch would have meant restoring
  * buildContainerArgs, spawn() and the old ActiveSessionRuntime — reverting
  * upstream's architecture to keep a handful of env vars. Upstream instead grew
- * exactly the seam this needs: contribute() returns env and mounts merged into
+ * exactly the seam this needs: a typed contribution (env, mounts) merged into
  * the SessionSpec before validation, and it fails closed, which is the property
- * that matters — a session without its credentials must not launch.
+ * that matters — a session without its credentials must not launch. v2.3.0
+ * called it contribute(); v2.4.0 (249bbe93) moved it into the lease returned
+ * by sessions.ensure() and made approvals a mandatory subscription — see
+ * docs/gateway-seam.md and the definition at the bottom of this file.
  *
  * See spec/fork-features.yaml: credential-proxy, egress-allowlist-proxy,
  * gateway-cost-budget, otel-trace-per-turn. All four contribute container env,
@@ -26,8 +29,13 @@ import fs from 'fs';
 import path from 'path';
 
 import { CONTAINER_TOOL_PROXY_SOCK_DIR } from '../container-config.js';
-import { getAgentGroup } from '../db/agent-groups.js';
-import { registerGatewayProvider } from './gateway-provider-registry.js';
+import type { DriverCapabilities } from '../drivers/types.js';
+import {
+  registerGatewayProvider,
+  type GatewayProviderDefinition,
+  type GatewaySessionInput,
+  type GatewaySessionLease,
+} from './gateway-provider-registry.js';
 
 export interface GatewayEnvInput {
   /** How the container reaches the host: a name, or loopback on a shared netns. */
@@ -98,27 +106,74 @@ export function gatewayEnv(input: GatewayEnvInput): Record<string, string> {
   return env;
 }
 
-registerGatewayProvider('credential-proxy', () => ({
+// A container with its own netns reaches the host gateway by name; a driver
+// that shares the host namespace reaches it on loopback. Reading the capability
+// rather than assuming docker is what keeps this working on a driver that is not
+// docker — the seam exists so features do not branch on driver identity.
+function hostFor(capabilities: DriverCapabilities): string {
+  return capabilities.sharedNetworkNamespace ? '127.0.0.1' : 'host.docker.internal';
+}
+
+/**
+ * The v2.4.0 provider contract (docs/gateway-seam.md). Three parts, two of them
+ * trivially satisfied because the proxy lives in the host process:
+ *
+ *  - `sessions.ensure` is where contribute() went: it returns the lease whose
+ *    typed contribution is merged into the SessionSpec before validation.
+ *    Nothing per-session is provisioned, so there is nothing to release.
+ *  - `networkAccess` is an intent, not a topology. `host` is the truth here —
+ *    the credential proxy, the tool-proxy socket front and the OTel collector
+ *    all run on the host, and the fork's allowlisting egress proxy is reached
+ *    through HTTPS_PROXY env, not by network placement. Upstream's egress
+ *    lockdown accepts only `runtime` targets; this install does not enable it.
+ *  - `approvals.subscribe` must stay OPEN until the host aborts it. The
+ *    coordinator treats a subscription that ends — cleanly or not — as a
+ *    gateway outage and closes session admission. The proxy never holds a
+ *    request for a human (budget caps deny on the wire, the approvals module
+ *    owns everything else), so the subscription simply waits for the abort.
+ *
+ * Exported so the test can assert the contribution without a spawn.
+ */
+export const credentialProxyProvider: GatewayProviderDefinition = {
   kind: 'credential-proxy',
-  async contribute({ key, capabilities }) {
-    // A container with its own netns reaches the host gateway by name; a driver
-    // that shares the host namespace reaches it on loopback. Reading the
-    // capability rather than assuming docker is what keeps this working on a
-    // driver that is not docker — the seam exists so features do not branch on
-    // driver identity.
-    const host = capabilities.sharedNetworkNamespace ? '127.0.0.1' : 'host.docker.internal';
-    const group = await getAgentGroup(key.agentGroupId);
-    // Fall back to the id rather than throwing: a missing row must not stop a
-    // spawn, and an attributable-but-ugly header beats no attribution.
-    const folder = group?.folder ?? key.agentGroupId;
-    const env = gatewayEnv({ host, folder });
-    // Per-group tool-proxy socket: reaching it IS the credential, and the group
-    // is proven by the mount rather than claimed in a request body. Set only when
-    // the host actually has a socket dir for this group, so a group without one
-    // falls back rather than pointing at a path that is not mounted.
-    if (process.env.HOME && fs.existsSync(path.join(process.env.HOME, 'tool-proxy-sockets', folder))) {
-      env.TOOL_PROXY_SOCKET = `${CONTAINER_TOOL_PROXY_SOCK_DIR}/tool-proxy.sock`;
-    }
-    return { env };
+  // No agent-facing skill: the only thing in the container that talks to the
+  // proxy is Claude Code's own HTTP client, pointed at it by ANTHROPIC_BASE_URL.
+  agentSkills: [],
+  sessions: {
+    async ensure(input: GatewaySessionInput): Promise<GatewaySessionLease> {
+      const host = hostFor(input.capabilities);
+      // Core hands over the folder (fork field on the input); a provider must not
+      // read the DB itself. Fall back to the id rather than throwing: a missing
+      // label must not stop a spawn, and an attributable-but-ugly header beats
+      // no attribution.
+      const folder = input.groupFolder ?? input.key.agentGroupId;
+      const env = gatewayEnv({ host, folder });
+      // Per-group tool-proxy socket: reaching it IS the credential, and the group
+      // is proven by the mount rather than claimed in a request body. Set only when
+      // the host actually has a socket dir for this group, so a group without one
+      // falls back rather than pointing at a path that is not mounted.
+      if (process.env.HOME && fs.existsSync(path.join(process.env.HOME, 'tool-proxy-sockets', folder))) {
+        env.TOOL_PROXY_SOCKET = `${CONTAINER_TOOL_PROXY_SOCK_DIR}/tool-proxy.sock`;
+      }
+      return {
+        contribution: {
+          env,
+          networkAccess: { endpoint: 'host.docker.internal', target: { kind: 'host' } },
+        },
+      };
+    },
   },
-}));
+  approvals: {
+    subscribe(_decide, signal): Promise<void> {
+      return new Promise<void>((resolve) => {
+        if (signal.aborted) {
+          resolve();
+          return;
+        }
+        signal.addEventListener('abort', () => resolve(), { once: true });
+      });
+    },
+  },
+};
+
+registerGatewayProvider(credentialProxyProvider);
