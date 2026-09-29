@@ -4,6 +4,7 @@ const state = vi.hoisted(() => ({
   adopted: false,
   approvalReady: false,
   releaseAdoption: undefined as (() => void) | undefined,
+  proxyListening: false,
   routeInbound: vi.fn(),
   startChannels: vi.fn(),
   ready: vi.fn(),
@@ -16,7 +17,15 @@ vi.mock('./config.js', () => ({
   CREDENTIAL_PROXY_PORT: 0,
   CREDENTIAL_PROXY_HOST: '127.0.0.1',
 }));
-vi.mock('./credential-proxy.js', () => ({ startCredentialProxy: async () => ({ close: vi.fn() }) }));
+// It must be listening before anything that can spawn a container — the
+// adapters and the sweep — or a first message would launch an agent whose
+// ANTHROPIC_BASE_URL points at nothing.
+vi.mock('./credential-proxy.js', () => ({
+  startCredentialProxy: async () => {
+    state.proxyListening = true;
+    return { close: vi.fn() };
+  },
+}));
 vi.mock('./circuit-breaker.js', () => ({ enforceStartupBackoff: vi.fn(), resetCircuitBreaker: vi.fn() }));
 vi.mock('./upgrade-state.js', () => ({ enforceUpgradeTripwire: vi.fn() }));
 vi.mock('./db/connection.js', () => ({ initDb: async () => ({ dialect: 'sqlite' }), closeDb: vi.fn() }));
@@ -83,6 +92,7 @@ it('finishes adoption before a channel can route its first inbound message', asy
     expect(state.adopted).toBe(true);
   });
   state.startChannels.mockImplementation(async (setup) => {
+    expect(state.proxyListening).toBe(true);
     setup({ channelType: 'fixture' }).onInbound('chat', null, {
       id: 'message',
       kind: 'text',
