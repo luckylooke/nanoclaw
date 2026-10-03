@@ -35,6 +35,7 @@ import { getMessagingGroupByPlatform } from '../../db/messaging-groups.js';
 import { getDeliveryAdapter, type ChannelDeliveryAdapter } from '../../delivery.js';
 import { log } from '../../log.js';
 import type { MessagingGroup } from '../../types.js';
+import { registerFlowInbound } from './inbound.js';
 import { FlowTaskStore, TaskInputError } from './tasks.js';
 
 export const FLOW_REPLY_PATH = '/flow-reply';
@@ -229,11 +230,16 @@ export function makeFlowTaskHandler(getStore: () => FlowTaskStore) {
 let server: http.Server | null = null;
 let store: FlowTaskStore | null = null;
 
+/** The one task store this process uses — shared by the bridge and the inbound interceptor. */
+export function getFlowTaskStore(): FlowTaskStore {
+  return (store ??= new FlowTaskStore(path.join(DATA_DIR, 'flow-tasks.db')));
+}
+
 /** Start the loopback-only bridge. Idempotent; a busy port is logged, not fatal. */
 export function startFlowReplyServer(port = FLOW_REPLY_PORT): http.Server {
   if (server) return server;
   const reply = makeFlowReplyHandler({ getAdapter: getDeliveryAdapter, lookupGroup: getMessagingGroupByPlatform });
-  const tasks = makeFlowTaskHandler(() => (store ??= new FlowTaskStore(path.join(DATA_DIR, 'flow-tasks.db'))));
+  const tasks = makeFlowTaskHandler(getFlowTaskStore);
   server = http.createServer((req, res) => {
     const route = (req.url || '').split('?')[0];
     void (route.startsWith('/flow-task/') ? tasks(req, res) : reply(req, res));
@@ -244,4 +250,9 @@ export function startFlowReplyServer(port = FLOW_REPLY_PORT): http.Server {
 }
 
 // Modules self-register at import time; tests import the handlers only.
-if (!process.env.VITEST) startFlowReplyServer();
+// The interceptor sends "[flow]" messages and replies on a waiting task's
+// thread to the incoming-message flow (inbound.ts); everything else routes as before.
+if (!process.env.VITEST) {
+  startFlowReplyServer();
+  registerFlowInbound(getFlowTaskStore);
+}
