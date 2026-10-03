@@ -45,6 +45,20 @@ interface Price {
 const PRICING: Array<{ match: string; price: Price }> = [
   { match: 'haiku', price: { input: 1.0, output: 5.0, cacheRead: 0.1, cacheWrite: 1.25 } },
   { match: 'sonnet', price: { input: 3.0, output: 15.0, cacheRead: 0.3, cacheWrite: 3.75 } },
+  // Opus and Fable had no line at all, so their calls were logged at EUR 0 and
+  // no budget cap could see them. Harmless while nothing called them; not once
+  // the model-class registry routes "deep" to claude-opus-5-5 (2026-10-03: an
+  // 18s, 1,452-output-token analysis was recorded as free). Rates from
+  // platform.claude.com/docs/en/models/overview and models.dev, read
+  // 2026-10-03. Cache reads are 5% of input on Opus 5.5 and 2.5% on Fable 5.1
+  // (10% elsewhere); a 5-minute cache write is 1.25x input. Specific versions
+  // first — first match wins.
+  { match: 'opus-5-5', price: { input: 4.0, output: 20.0, cacheRead: 0.2, cacheWrite: 5.0 } },
+  { match: 'opus', price: { input: 5.0, output: 25.0, cacheRead: 0.5, cacheWrite: 6.25 } },
+  { match: 'fable-5-1', price: { input: 10.0, output: 50.0, cacheRead: 0.25, cacheWrite: 12.5 } },
+  { match: 'mythos-5-1', price: { input: 10.0, output: 50.0, cacheRead: 0.25, cacheWrite: 12.5 } },
+  { match: 'fable', price: { input: 10.0, output: 50.0, cacheRead: 1.0, cacheWrite: 12.5 } },
+  { match: 'mythos', price: { input: 10.0, output: 50.0, cacheRead: 1.0, cacheWrite: 12.5 } },
 ];
 
 const _warnedModels = new Set<string>();
