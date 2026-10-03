@@ -23,6 +23,11 @@ const usd = (model: string, u: typeof MTOK_IN) =>
 describe('gateway pricing', () => {
   it.each([
     ['claude-haiku-4-5-20251001', 1, 5],
+    ['claude-sonnet-4-6', 3, 15],
+    // Sonnet 5 at Sonnet 4.6 rates was billed 1.5x (2e715ae2); the v2.4.0 rebase
+    // then dropped that line silently for four days. Pinned so it cannot again.
+    ['claude-sonnet-5', 2, 10],
+    ['claude-sonnet-5-5', 2, 10],
     ['claude-opus-5-5', 4, 20],
     ['claude-opus-5', 5, 25],
     ['claude-opus-4-8', 5, 25],
