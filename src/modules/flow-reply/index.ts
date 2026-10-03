@@ -1,39 +1,41 @@
 /**
- * Flow reply — lets a Total.js Flow process answer on the channel a message
- * came from, without the flow ever holding a channel credential.
+ * Flow bridge — what a Total.js Flow process needs from nanoclaw, on one
+ * loopback-only server (127.0.0.1:3006, FLOW_REPLY_PORT overrides):
  *
- *   POST http://127.0.0.1:3006/flow-reply        (FLOW_REPLY_PORT overrides)
- *   { "channel_type": "slack", "platform_id": "slack:C0…", "thread_id": null,
- *     "instance": "slack", "text": "…" }
+ *   POST /flow-reply          answer on the channel a message came from
+ *   POST /flow-task/create    save a task that waits (for a person or an agent)
+ *   POST /flow-task/find-open the open task on a thread, if any
+ *   POST /flow-task/update    move a task on: status, step, attempt, data, event
  *
- * The flow gets the address fields with the inbound message and hands them
- * back unchanged, so the same flow answers Slack, the CLI or any future
- * channel: the channel adapter already registered with delivery does the
- * sending. That is the point — a Slack bot token inside a flow would be a
- * secret in a file the Flow UI can read and export.
+ * Reply: the flow gets the inbound message with its address — channel_type,
+ * platform_id, thread_id, instance — and hands it back with the text. The
+ * registered channel adapter delivers it, exactly as it delivers agent
+ * replies, so the flow never holds a Slack token. The answer carries
+ * `reply_thread_id`: the thread a person's answer to this message will
+ * arrive on, which is what a waiting task is keyed by.
  *
- * Its own server, bound to 127.0.0.1 — NOT a route on the webhook server. The
- * first version was registered there, and the webhook server's port is what
- * Tailscale Funnel publishes to the internet. Funnel proxies from loopback, so
- * the loopback check passed for an internet caller: a probe from outside got a
- * 404 "no known messaging group" from this handler (2026-10-03, rolled back
- * within three minutes, nothing delivered). Nothing publishes this port.
+ * Tasks: see tasks.ts — a flow's state between messages, so a step can wait
+ * hours for a person and a loop can count its rounds.
  *
- * Guards, each for a way this endpoint could be abused:
- * - Loopback callers only, and no proxy headers at all (X-Forwarded-For,
- *   Forwarded, Tailscale-*): if anything ever does front this port, a proxied
- *   request is refused rather than mistaken for a local one.
- * - Only to a messaging group the system already knows and has not denied or
- *   detached. A flow cannot be talked into messaging an arbitrary channel the
- *   bot happens to be in.
- * - Bounded body and text, so a runaway flow cannot post a novel.
+ * Its own server, NOT a route on the webhook server. The first version was a
+ * webhook route, and the webhook server's port is what Tailscale Funnel
+ * publishes; Funnel proxies from loopback, so the loopback check passed for an
+ * internet caller (2026-10-03, rolled back within three minutes, nothing
+ * delivered). Guards on every path:
+ * - loopback callers only, and no proxy headers at all (X-Forwarded-For,
+ *   Forwarded, Tailscale-*), in case anything ever fronts this port;
+ * - replies only to a messaging group the system knows and has not denied or
+ *   detached; bounded body and text.
  */
 import http from 'http';
+import path from 'path';
 
+import { DATA_DIR } from '../../config.js';
 import { getMessagingGroupByPlatform } from '../../db/messaging-groups.js';
 import { getDeliveryAdapter, type ChannelDeliveryAdapter } from '../../delivery.js';
 import { log } from '../../log.js';
 import type { MessagingGroup } from '../../types.js';
+import { FlowTaskStore, TaskInputError } from './tasks.js';
 
 export const FLOW_REPLY_PATH = '/flow-reply';
 export const FLOW_REPLY_PORT = Number(process.env.FLOW_REPLY_PORT || 3006);
@@ -46,15 +48,9 @@ export interface FlowReplyDeps {
   lookupGroup: (channelType: string, platformId: string, instance?: string) => Promise<MessagingGroup | undefined>;
 }
 
-interface FlowReplyBody {
-  channel_type?: unknown;
-  platform_id?: unknown;
-  thread_id?: unknown;
-  instance?: unknown;
-  text?: unknown;
-}
+type Json = Record<string, unknown>;
 
-function send(res: http.ServerResponse, status: number, body: Record<string, unknown>): void {
+function send(res: http.ServerResponse, status: number, body: Json): void {
   const payload = JSON.stringify(body);
   res.writeHead(status, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) });
   res.end(payload);
@@ -80,26 +76,52 @@ function readBody(req: http.IncomingMessage): Promise<string | null> {
 
 const str = (v: unknown): string | null => (typeof v === 'string' && v.length > 0 ? v : null);
 
+/** Method, caller and body checks shared by every path. Returns the parsed body or null (response sent). */
+async function admit(req: http.IncomingMessage, res: http.ServerResponse): Promise<Json | null> {
+  if (req.method !== 'POST') {
+    send(res, 405, { ok: false, error: 'POST only' });
+    return null;
+  }
+  const proxied = Object.keys(req.headers).some(
+    (h) => h === 'x-forwarded-for' || h === 'forwarded' || h.startsWith('tailscale-'),
+  );
+  if (!LOOPBACK.has(req.socket.remoteAddress || '') || proxied) {
+    log.warn('Flow bridge: refused caller', { ip: req.socket.remoteAddress, proxied, url: req.url });
+    send(res, 403, { ok: false, error: 'local, unproxied callers only' });
+    return null;
+  }
+  const raw = await readBody(req);
+  if (raw === null) {
+    send(res, 413, { ok: false, error: `body over ${MAX_BODY_BYTES} bytes` });
+    return null;
+  }
+  try {
+    const body = JSON.parse(raw) as unknown;
+    if (!body || typeof body !== 'object' || Array.isArray(body)) throw new Error('not an object');
+    return body as Json;
+  } catch {
+    send(res, 400, { ok: false, error: 'body is not a JSON object' });
+    return null;
+  }
+}
+
+/**
+ * The thread a person's answer to a just-delivered message arrives on. A reply
+ * already in a thread stays there; a top-level post starts a thread keyed by
+ * its own message id — the chat-sdk thread id is `<platformId>:<messageTs>`
+ * (e.g. slack:C0B69CZRS9Y:1789985626.319219 in v2.db sessions).
+ */
+export function replyThreadId(channelType: string, platformId: string, threadId: string | null, msgId?: string) {
+  if (threadId) return threadId;
+  if (!msgId || channelType === 'cli') return null;
+  return `${platformId}:${msgId}`;
+}
+
 export function makeFlowReplyHandler(deps: FlowReplyDeps) {
   return async (req: http.IncomingMessage, res: http.ServerResponse): Promise<void> => {
     if ((req.url || '').split('?')[0] !== FLOW_REPLY_PATH) return send(res, 404, { ok: false, error: 'not found' });
-    if (req.method !== 'POST') return send(res, 405, { ok: false, error: 'POST only' });
-    const proxied = Object.keys(req.headers).some(
-      (h) => h === 'x-forwarded-for' || h === 'forwarded' || h.startsWith('tailscale-'),
-    );
-    if (!LOOPBACK.has(req.socket.remoteAddress || '') || proxied) {
-      log.warn('Flow reply: refused caller', { ip: req.socket.remoteAddress, proxied });
-      return send(res, 403, { ok: false, error: 'local, unproxied callers only' });
-    }
-
-    const raw = await readBody(req);
-    if (raw === null) return send(res, 413, { ok: false, error: `body over ${MAX_BODY_BYTES} bytes` });
-    let body: FlowReplyBody;
-    try {
-      body = JSON.parse(raw) as FlowReplyBody;
-    } catch {
-      return send(res, 400, { ok: false, error: 'body is not JSON' });
-    }
+    const body = await admit(req, res);
+    if (!body) return;
 
     const channelType = str(body.channel_type);
     const platformId = str(body.platform_id);
@@ -133,7 +155,11 @@ export function makeFlowReplyHandler(deps: FlowReplyDeps) {
         group.instance,
       );
       log.info('Flow reply delivered', { channelType, platformId, threadId, platformMsgId, chars: text.length });
-      return send(res, 200, { ok: true, platform_message_id: platformMsgId ?? null });
+      return send(res, 200, {
+        ok: true,
+        platform_message_id: platformMsgId ?? null,
+        reply_thread_id: replyThreadId(channelType, platformId, threadId, platformMsgId),
+      });
     } catch (err) {
       log.error('Flow reply: delivery failed', { channelType, platformId, err: String(err) });
       return send(res, 502, { ok: false, error: `delivery failed: ${String(err)}` });
@@ -141,17 +167,81 @@ export function makeFlowReplyHandler(deps: FlowReplyDeps) {
   };
 }
 
-let server: http.Server | null = null;
+export function makeFlowTaskHandler(getStore: () => FlowTaskStore) {
+  return async (req: http.IncomingMessage, res: http.ServerResponse): Promise<void> => {
+    const route = (req.url || '').split('?')[0];
+    if (!['/flow-task/create', '/flow-task/find-open', '/flow-task/update'].includes(route)) {
+      return send(res, 404, { ok: false, error: 'not found' });
+    }
+    const body = await admit(req, res);
+    if (!body) return;
+    try {
+      const store = getStore();
+      if (route === '/flow-task/find-open') {
+        const channelType = str(body.channel_type);
+        const platformId = str(body.platform_id);
+        if (!channelType || !platformId)
+          return send(res, 400, { ok: false, error: 'channel_type and platform_id are required' });
+        return send(res, 200, { ok: true, task: store.findOpen(channelType, platformId, str(body.thread_id)) });
+      }
+      if (route === '/flow-task/create') {
+        const flow = str(body.flow);
+        const step = str(body.step);
+        const channelType = str(body.channel_type);
+        const platformId = str(body.platform_id);
+        if (!flow || !step || !channelType || !platformId) {
+          return send(res, 400, { ok: false, error: 'flow, step, channel_type and platform_id are required' });
+        }
+        const task = store.create({
+          flow,
+          step,
+          status: body.status,
+          channel_type: channelType,
+          platform_id: platformId,
+          instance: str(body.instance),
+          thread_id: str(body.thread_id),
+          data: body.data,
+          event: body.event && typeof body.event === 'object' ? (body.event as Json) : undefined,
+        });
+        log.info('Flow task created', { id: task.id, flow, step, status: task.status, thread: task.thread_id });
+        return send(res, 200, { ok: true, task });
+      }
+      const id = str(body.id);
+      if (!id) return send(res, 400, { ok: false, error: 'id is required' });
+      const task = store.update(id, {
+        status: body.status,
+        step: body.step,
+        attempt: body.attempt,
+        thread_id: body.thread_id,
+        data: body.data,
+        event: body.event && typeof body.event === 'object' ? (body.event as Json) : undefined,
+      });
+      log.info('Flow task updated', { id, status: task.status, step: task.step, attempt: task.attempt });
+      return send(res, 200, { ok: true, task });
+    } catch (err) {
+      if (err instanceof TaskInputError) return send(res, 400, { ok: false, error: err.message });
+      log.error('Flow task request failed', { route, err: String(err) });
+      return send(res, 500, { ok: false, error: String(err) });
+    }
+  };
+}
 
-/** Start the loopback-only reply server. Idempotent; a busy port is logged, not fatal. */
+let server: http.Server | null = null;
+let store: FlowTaskStore | null = null;
+
+/** Start the loopback-only bridge. Idempotent; a busy port is logged, not fatal. */
 export function startFlowReplyServer(port = FLOW_REPLY_PORT): http.Server {
   if (server) return server;
-  const handler = makeFlowReplyHandler({ getAdapter: getDeliveryAdapter, lookupGroup: getMessagingGroupByPlatform });
-  server = http.createServer((req, res) => void handler(req, res));
-  server.on('error', (err) => log.error('Flow reply server error', { port, err: String(err) }));
+  const reply = makeFlowReplyHandler({ getAdapter: getDeliveryAdapter, lookupGroup: getMessagingGroupByPlatform });
+  const tasks = makeFlowTaskHandler(() => (store ??= new FlowTaskStore(path.join(DATA_DIR, 'flow-tasks.db'))));
+  server = http.createServer((req, res) => {
+    const route = (req.url || '').split('?')[0];
+    void (route.startsWith('/flow-task/') ? tasks(req, res) : reply(req, res));
+  });
+  server.on('error', (err) => log.error('Flow bridge server error', { port, err: String(err) }));
   server.listen(port, '127.0.0.1', () => log.info('Flow reply server listening', { host: '127.0.0.1', port }));
   return server;
 }
 
-// Modules self-register at import time; tests import the handler only.
+// Modules self-register at import time; tests import the handlers only.
 if (!process.env.VITEST) startFlowReplyServer();

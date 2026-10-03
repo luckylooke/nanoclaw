@@ -71,7 +71,10 @@ describe('flow-reply', () => {
   it('delivers through the channel adapter with the group instance, as a chat message', async () => {
     deliver.mockClear();
     const r = await call(deps(), OK_BODY);
-    expect(r).toEqual({ status: 200, json: { ok: true, platform_message_id: 'ts-123' } });
+    expect(r).toEqual({
+      status: 200,
+      json: { ok: true, platform_message_id: 'ts-123', reply_thread_id: 'slack:C0B6B8A1MEV:ts-123' },
+    });
     expect(deliver).toHaveBeenCalledWith(
       'slack',
       'slack:C0B6B8A1MEV',
