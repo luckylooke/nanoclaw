@@ -73,6 +73,11 @@ const WATCHED = [
   // The Storybook launcher: it maps a systemd instance to a package directory,
   // and a silent change to that mapping is a catalogue that starts the wrong one.
   'tools/storybook/launch.js',
+  // The model-class watcher (daily cron) and its rules. It writes the registry
+  // the gateway resolves `model: "fast"` against, and it holds the Slack token —
+  // a silent change could move a class or stop proposing retirements.
+  'tools/models/models.js',
+  'tools/models/lib.js',
   'tool-proxy/daemon.js',
   'tool-proxy/tool-exec.js',
   // SEC-AI2: holds the shared bearer token host-side and stamps each call's
