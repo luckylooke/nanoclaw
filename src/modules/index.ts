@@ -28,3 +28,6 @@ import './feedback/index.js';
 import './agent-to-agent/index.js';
 import './self-mod/index.js';
 import './community-portal/index.js';
+// Flow reply: lets a Total.js Flow process answer on the channel a message came
+// from, through the registered channel adapter, without holding a token.
+import './flow-reply/index.js';
