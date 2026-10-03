@@ -42,6 +42,7 @@ import {
   type Usage,
 } from './gateway-db.js';
 import { log } from './log.js';
+import { loadModelClasses, resolveModelClass, summarize } from './model-classes.js';
 
 export type AuthMode = 'api-key' | 'oauth';
 
@@ -195,6 +196,8 @@ export function startCredentialProxy(port: number, host = '127.0.0.1'): Promise<
   // Gateway persistence (best-effort; failures are logged and disable logging
   // + caps but never block the proxy).
   initGatewayDb();
+  const bootClasses = loadModelClasses();
+  log.info('Gateway: model classes', { classes: bootClasses ? summarize(bootClasses) : null });
 
   return new Promise((resolve, reject) => {
     const server = createServer((req, res) => {
@@ -203,8 +206,31 @@ export function startCredentialProxy(port: number, host = '127.0.0.1'): Promise<
       req.on('end', () => {
         const t0 = Date.now();
         const body = Buffer.concat(chunks);
-        // What actually goes upstream. Only the budget gate ever replaces it.
+        // What actually goes upstream. Replaced only by model-class resolution
+        // and the budget gate, both of which re-serialize the same parsed body.
         let forwardBody: Buffer = body;
+
+        // --- Model classes: read-only lookup, answered here, never forwarded ---
+        // Lets flows and host tools ask what `fast` / `balanced` / `deep` mean
+        // right now (agent-system/tools/models/model-classes.json).
+        if (
+          req.method === 'GET' &&
+          !!req.url &&
+          (req.url === '/v1/model-classes' || req.url.startsWith('/v1/model-classes?'))
+        ) {
+          const classes = loadModelClasses();
+          const payload = JSON.stringify(
+            classes
+              ? { classes }
+              : { type: 'error', error: { type: 'api_error', message: 'model class registry unavailable' } },
+          );
+          res.writeHead(classes ? 200 : 503, {
+            'content-type': 'application/json',
+            'content-length': Buffer.byteLength(payload),
+          });
+          res.end(payload);
+          return;
+        }
 
         // Is this a model-inference call we should log + cap?
         const isMessages =
@@ -282,6 +308,38 @@ export function startCredentialProxy(port: number, host = '127.0.0.1'): Promise<
             if (oauthToken) {
               headers['authorization'] = `Bearer ${oauthToken}`;
             }
+          }
+        }
+
+        // --- Model classes: `model: "fast"` → the class's current Claude id ---
+        // Before the budget gates on purpose: they log and price `model`, which
+        // must be the real id, and the task gate re-serializes parsedBody, which
+        // by then carries the resolved id. Concrete ids pass through untouched.
+        if (isMessages && parsedBody) {
+          const r = resolveModelClass(parsedBody, loadModelClasses());
+          if (r.kind === 'resolved') {
+            // The task gate below re-serializes parsedBody when it injects its
+            // directive, so parsedBody must carry the resolved id too — or that
+            // path would forward the class name and Anthropic would 404 it.
+            parsedBody.model = r.model;
+            forwardBody = r.body;
+            headers['content-length'] = forwardBody.length;
+            model = r.model;
+            log.info('Gateway: model class resolved', { group: groupSlug, class: r.className, model: r.model });
+          } else if (r.kind === 'unknown' || r.kind === 'unavailable') {
+            const status = r.kind === 'unknown' ? 400 : 503;
+            const message =
+              r.kind === 'unknown'
+                ? `unknown model class "${r.className}" (known: ${r.known.join(', ') || 'none'})`
+                : `model class "${r.className}" requested but the class registry is unavailable`;
+            const payload = JSON.stringify({
+              type: 'error',
+              error: { type: r.kind === 'unknown' ? 'invalid_request_error' : 'api_error', message },
+            });
+            res.writeHead(status, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) });
+            res.end(payload);
+            log.warn('Gateway: model class not resolved', { group: groupSlug, class: r.className, kind: r.kind });
+            return;
           }
         }
 
