@@ -36,11 +36,13 @@ import { getDeliveryAdapter, type ChannelDeliveryAdapter } from '../../delivery.
 import { log } from '../../log.js';
 import type { MessagingGroup } from '../../types.js';
 import { registerFlowInbound } from './inbound.js';
-import { FlowTaskStore, TaskInputError } from './tasks.js';
+import { FlowTaskStore, TaskInputError, type TraceEvent } from './tasks.js';
 
 export const FLOW_REPLY_PATH = '/flow-reply';
 export const FLOW_REPLY_PORT = Number(process.env.FLOW_REPLY_PORT || 3006);
 const MAX_BODY_BYTES = 64 * 1024;
+// A trace batch carries model answers (up to 16 KB each, truncated by the recorder).
+const MAX_TRACE_BODY_BYTES = 1024 * 1024;
 const MAX_TEXT_CHARS = 12_000;
 const LOOPBACK = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
 
@@ -57,13 +59,13 @@ function send(res: http.ServerResponse, status: number, body: Json): void {
   res.end(payload);
 }
 
-function readBody(req: http.IncomingMessage): Promise<string | null> {
+function readBody(req: http.IncomingMessage, limit = MAX_BODY_BYTES): Promise<string | null> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let size = 0;
     req.on('data', (c: Buffer) => {
       size += c.length;
-      if (size > MAX_BODY_BYTES) {
+      if (size > limit) {
         resolve(null);
         req.destroy();
         return;
@@ -78,7 +80,11 @@ function readBody(req: http.IncomingMessage): Promise<string | null> {
 const str = (v: unknown): string | null => (typeof v === 'string' && v.length > 0 ? v : null);
 
 /** Method, caller and body checks shared by every path. Returns the parsed body or null (response sent). */
-async function admit(req: http.IncomingMessage, res: http.ServerResponse): Promise<Json | null> {
+async function admit(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  limit = MAX_BODY_BYTES,
+): Promise<Json | null> {
   if (req.method !== 'POST') {
     send(res, 405, { ok: false, error: 'POST only' });
     return null;
@@ -91,9 +97,9 @@ async function admit(req: http.IncomingMessage, res: http.ServerResponse): Promi
     send(res, 403, { ok: false, error: 'local, unproxied callers only' });
     return null;
   }
-  const raw = await readBody(req);
+  const raw = await readBody(req, limit);
   if (raw === null) {
-    send(res, 413, { ok: false, error: `body over ${MAX_BODY_BYTES} bytes` });
+    send(res, 413, { ok: false, error: `body over ${limit} bytes` });
     return null;
   }
   try {
@@ -171,13 +177,34 @@ export function makeFlowReplyHandler(deps: FlowReplyDeps) {
 export function makeFlowTaskHandler(getStore: () => FlowTaskStore) {
   return async (req: http.IncomingMessage, res: http.ServerResponse): Promise<void> => {
     const route = (req.url || '').split('?')[0];
-    if (!['/flow-task/create', '/flow-task/find-open', '/flow-task/update'].includes(route)) {
-      return send(res, 404, { ok: false, error: 'not found' });
-    }
-    const body = await admit(req, res);
+    const ROUTES = [
+      '/flow-task/create',
+      '/flow-task/find-open',
+      '/flow-task/update',
+      '/flow-trace/append',
+      '/flow-trace/runs',
+      '/flow-trace/run',
+    ];
+    if (!ROUTES.includes(route)) return send(res, 404, { ok: false, error: 'not found' });
+    const body = await admit(req, res, route === '/flow-trace/append' ? MAX_TRACE_BODY_BYTES : MAX_BODY_BYTES);
     if (!body) return;
     try {
       const store = getStore();
+      if (route === '/flow-trace/append') {
+        const flow = str(body.flow);
+        if (!flow || !Array.isArray(body.events))
+          return send(res, 400, { ok: false, error: 'flow and events[] are required' });
+        return send(res, 200, { ok: true, appended: store.appendTrace(flow, body.events as TraceEvent[]) });
+      }
+      if (route === '/flow-trace/runs') {
+        return send(res, 200, { ok: true, runs: store.listRuns(str(body.flow), Number(body.limit) || 50) });
+      }
+      if (route === '/flow-trace/run') {
+        const runId = str(body.run_id);
+        if (!runId) return send(res, 400, { ok: false, error: 'run_id is required' });
+        const r = store.getRun(runId);
+        return r ? send(res, 200, { ok: true, ...r }) : send(res, 404, { ok: false, error: `no run ${runId}` });
+      }
       if (route === '/flow-task/find-open') {
         const channelType = str(body.channel_type);
         const platformId = str(body.platform_id);
@@ -242,7 +269,7 @@ export function startFlowReplyServer(port = FLOW_REPLY_PORT): http.Server {
   const tasks = makeFlowTaskHandler(getFlowTaskStore);
   server = http.createServer((req, res) => {
     const route = (req.url || '').split('?')[0];
-    void (route.startsWith('/flow-task/') ? tasks(req, res) : reply(req, res));
+    void (route.startsWith('/flow-task/') || route.startsWith('/flow-trace/') ? tasks(req, res) : reply(req, res));
   });
   server.on('error', (err) => log.error('Flow bridge server error', { port, err: String(err) }));
   server.listen(port, '127.0.0.1', () => log.info('Flow reply server listening', { host: '127.0.0.1', port }));
