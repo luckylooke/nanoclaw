@@ -126,6 +126,23 @@ export class FlowTaskStore {
     // with an id, and Flow copies a message's id into the previd of every message
     // a node derives from it — so an output can be tied to the exact run of the
     // node that produced it, which a node run several times in one flow needs.
+    // Agent jobs: work a flow hands to a dev agent (implementation…). The agent
+    // works in a real thread of its own channel; the job row ties that thread to
+    // the flow task, so the agent's final message can call the flow back.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS flow_jobs (
+        key         TEXT PRIMARY KEY,
+        agent       TEXT NOT NULL,
+        platform_id TEXT NOT NULL,
+        thread_id   TEXT NOT NULL,
+        status      TEXT NOT NULL,
+        created_at  TEXT NOT NULL,
+        finished_at TEXT,
+        result      TEXT,
+        callback    TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_flow_jobs_thread ON flow_jobs(platform_id, thread_id, status);
+    `);
     const cols = (this.db.prepare('PRAGMA table_info(flow_trace)').all() as { name: string }[]).map((c) => c.name);
     if (!cols.includes('msg_id')) this.db.exec('ALTER TABLE flow_trace ADD COLUMN msg_id TEXT');
     if (!cols.includes('prev_id')) this.db.exec('ALTER TABLE flow_trace ADD COLUMN prev_id TEXT');
@@ -296,9 +313,67 @@ export class FlowTaskStore {
     return { run, events };
   }
 
+  /** The newest open task whose data.key is this flow key (an agent job's callback carries only the key). */
+  findOpenByKey(key: string): FlowTask | null {
+    const r = this.db
+      .prepare(
+        `SELECT * FROM flow_tasks WHERE json_extract(data, '$.key') = ? AND status IN (${OPEN.map(() => '?').join(',')})
+          ORDER BY updated_at DESC LIMIT 1`,
+      )
+      .get(key, ...OPEN) as Row | undefined;
+    return r ? fromRow(r) : null;
+  }
+
+  /** One running job per key: a new dispatch for the same key replaces the old (a re-implementation round). */
+  startJob(job: { key: string; agent: string; platform_id: string; thread_id: string }): FlowJob {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO flow_jobs (key, agent, platform_id, thread_id, status, created_at) VALUES (?, ?, ?, ?, 'running', ?)
+         ON CONFLICT(key) DO UPDATE SET agent = excluded.agent, platform_id = excluded.platform_id, thread_id = excluded.thread_id,
+           status = 'running', created_at = excluded.created_at, finished_at = NULL, result = NULL, callback = NULL`,
+      )
+      .run(job.key, job.agent, job.platform_id, job.thread_id, now);
+    return this.getJob(job.key) as FlowJob;
+  }
+
+  getJob(key: string): FlowJob | null {
+    return (this.db.prepare('SELECT * FROM flow_jobs WHERE key = ?').get(key) as FlowJob | undefined) ?? null;
+  }
+
+  runningJobOnThread(platformId: string, threadId: string): FlowJob | null {
+    return (
+      (this.db
+        .prepare("SELECT * FROM flow_jobs WHERE platform_id = ? AND thread_id = ? AND status = 'running' LIMIT 1")
+        .get(platformId, threadId) as FlowJob | undefined) ?? null
+    );
+  }
+
+  finishJob(key: string, status: 'done' | 'blocked', result: string): void {
+    this.db
+      .prepare("UPDATE flow_jobs SET status = ?, result = ?, finished_at = ? WHERE key = ? AND status = 'running'")
+      .run(status, result.slice(0, 20000), new Date().toISOString(), key);
+  }
+
+  noteCallback(key: string, outcome: string): void {
+    this.db.prepare('UPDATE flow_jobs SET callback = ? WHERE key = ?').run(outcome.slice(0, 500), key);
+  }
+
   close(): void {
     this.db.close();
   }
+}
+
+export interface FlowJob {
+  key: string;
+  agent: string;
+  platform_id: string;
+  thread_id: string;
+  status: 'running' | 'done' | 'blocked';
+  created_at: string;
+  finished_at: string | null;
+  result: string | null;
+  callback: string | null;
 }
 
 export const TRACE_KEEP_DAYS = 7;

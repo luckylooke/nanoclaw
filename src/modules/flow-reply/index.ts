@@ -6,6 +6,9 @@
  *   POST /flow-task/create    save a task that waits (for a person or an agent)
  *   POST /flow-task/find-open the open task on a thread, if any
  *   POST /flow-task/update    move a task on: status, step, attempt, data, event
+ *   POST /flow-task/find-key  the open task carrying a flow key (an agent finished)
+ *   POST /flow-agent/dispatch hand a phase to a dev agent (agent.ts)
+ *   POST /flow-agent/job      the state of that hand-off
  *
  * Reply: the flow gets the inbound message with its address — channel_type,
  * platform_id, thread_id, instance — and hands it back with the text. The
@@ -31,9 +34,13 @@ import http from 'http';
 import path from 'path';
 
 import { DATA_DIR } from '../../config.js';
+import { getDb } from '../../db/connection.js';
 import { getMessagingGroupByPlatform } from '../../db/messaging-groups.js';
-import { getDeliveryAdapter, type ChannelDeliveryAdapter } from '../../delivery.js';
+import { getDeliveryAdapter, registerPostDeliveryHook, type ChannelDeliveryAdapter } from '../../delivery.js';
 import { log } from '../../log.js';
+import { routeInbound } from '../../router.js';
+import { getOwners } from '../permissions/db/user-roles.js';
+import { dispatch, DispatchError, onAgentMessage, type AgentChannel, type DispatchDeps } from './agent.js';
 import type { MessagingGroup } from '../../types.js';
 import { registerFlowInbound } from './inbound.js';
 import { FlowTaskStore, TaskInputError, type TraceEvent } from './tasks.js';
@@ -181,6 +188,8 @@ export function makeFlowTaskHandler(getStore: () => FlowTaskStore) {
       '/flow-task/create',
       '/flow-task/find-open',
       '/flow-task/update',
+      '/flow-task/find-key',
+      '/flow-agent/job',
       '/flow-trace/append',
       '/flow-trace/runs',
       '/flow-trace/run',
@@ -204,6 +213,13 @@ export function makeFlowTaskHandler(getStore: () => FlowTaskStore) {
         if (!runId) return send(res, 400, { ok: false, error: 'run_id is required' });
         const r = store.getRun(runId);
         return r ? send(res, 200, { ok: true, ...r }) : send(res, 404, { ok: false, error: `no run ${runId}` });
+      }
+      if (route === '/flow-task/find-key' || route === '/flow-agent/job') {
+        const key = str(body.key);
+        if (!key) return send(res, 400, { ok: false, error: 'key is required' });
+        return route === '/flow-agent/job'
+          ? send(res, 200, { ok: true, job: store.getJob(key) })
+          : send(res, 200, { ok: true, task: store.findOpenByKey(key) });
       }
       if (route === '/flow-task/find-open') {
         const channelType = str(body.channel_type);
@@ -254,6 +270,61 @@ export function makeFlowTaskHandler(getStore: () => FlowTaskStore) {
   };
 }
 
+export function makeFlowAgentHandler(deps: DispatchDeps) {
+  return async (req: http.IncomingMessage, res: http.ServerResponse): Promise<void> => {
+    if ((req.url || '').split('?')[0] !== '/flow-agent/dispatch')
+      return send(res, 404, { ok: false, error: 'not found' });
+    const body = await admit(req, res);
+    if (!body) return;
+    try {
+      return send(res, 200, { ok: true, ...(await dispatch(body, deps)) });
+    } catch (err) {
+      if (err instanceof DispatchError) return send(res, err.status, { ok: false, error: err.message });
+      log.error('Flow agent dispatch failed', { err: String(err) });
+      return send(res, 500, { ok: false, error: String(err) });
+    }
+  };
+}
+
+/** The Slack channel an agent group is wired to (rows keyed "slack:C…" carry the thread format the router uses). */
+async function agentChannel(agent: string): Promise<AgentChannel | null> {
+  const row = await getDb().get<AgentChannel>(
+    `SELECT mg.channel_type, mg.platform_id, mg.instance FROM messaging_group_agents mga
+       JOIN messaging_groups mg ON mg.id = mga.messaging_group_id
+       JOIN agent_groups ag ON ag.id = mga.agent_group_id
+      WHERE ag.folder = ? AND mg.platform_id LIKE 'slack:%' AND mg.denied_at IS NULL AND mg.detached_at IS NULL
+      ORDER BY mg.created_at LIMIT 1`,
+    agent,
+  );
+  return row ?? null;
+}
+
+async function ownerHandle(): Promise<string | null> {
+  const owner = (await getOwners()).find((o) => o.user_id.startsWith('slack:'));
+  return owner ? owner.user_id.slice('slack:'.length) : null;
+}
+
+function postJson(url: string, body: unknown): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const payload = JSON.stringify(body);
+    const req = http.request(
+      url,
+      {
+        method: 'POST',
+        timeout: 20_000,
+        headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) },
+      },
+      (r) => {
+        r.resume();
+        r.on('end', () => resolve(r.statusCode || 0));
+      },
+    );
+    req.on('timeout', () => req.destroy(new Error('timed out')));
+    req.on('error', reject);
+    req.end(payload);
+  });
+}
+
 let server: http.Server | null = null;
 let store: FlowTaskStore | null = null;
 
@@ -267,9 +338,18 @@ export function startFlowReplyServer(port = FLOW_REPLY_PORT): http.Server {
   if (server) return server;
   const reply = makeFlowReplyHandler({ getAdapter: getDeliveryAdapter, lookupGroup: getMessagingGroupByPlatform });
   const tasks = makeFlowTaskHandler(getFlowTaskStore);
+  const agents = makeFlowAgentHandler({
+    store: getFlowTaskStore,
+    getAdapter: getDeliveryAdapter,
+    agentChannel,
+    ownerHandle,
+    route: routeInbound,
+  });
   server = http.createServer((req, res) => {
     const route = (req.url || '').split('?')[0];
-    void (route.startsWith('/flow-task/') || route.startsWith('/flow-trace/') ? tasks(req, res) : reply(req, res));
+    if (route === '/flow-agent/dispatch') return void agents(req, res);
+    const isTask = route.startsWith('/flow-task/') || route.startsWith('/flow-trace/') || route === '/flow-agent/job';
+    void (isTask ? tasks(req, res) : reply(req, res));
   });
   server.on('error', (err) => log.error('Flow bridge server error', { port, err: String(err) }));
   server.listen(port, '127.0.0.1', () => log.info('Flow reply server listening', { host: '127.0.0.1', port }));
@@ -282,4 +362,6 @@ export function startFlowReplyServer(port = FLOW_REPLY_PORT): http.Server {
 if (!process.env.VITEST) {
   startFlowReplyServer();
   registerFlowInbound(getFlowTaskStore);
+  // An agent's reply carrying [[flow:done|blocked <key>]] on a job thread calls the flow back.
+  registerPostDeliveryHook((msg) => onAgentMessage(msg, { store: getFlowTaskStore, post: postJson }));
 }
