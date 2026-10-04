@@ -122,6 +122,13 @@ export class FlowTaskStore {
         PRIMARY KEY (run_id, seq)
       );
     `);
+    // msg_id / prev_id (2026-10-04): the recorder stamps each delivered message
+    // with an id, and Flow copies a message's id into the previd of every message
+    // a node derives from it — so an output can be tied to the exact run of the
+    // node that produced it, which a node run several times in one flow needs.
+    const cols = (this.db.prepare('PRAGMA table_info(flow_trace)').all() as { name: string }[]).map((c) => c.name);
+    if (!cols.includes('msg_id')) this.db.exec('ALTER TABLE flow_trace ADD COLUMN msg_id TEXT');
+    if (!cols.includes('prev_id')) this.db.exec('ALTER TABLE flow_trace ADD COLUMN prev_id TEXT');
   }
 
   get(id: string): FlowTask | null {
@@ -248,7 +255,7 @@ export class FlowTaskStore {
       'UPDATE flow_runs SET last_at = ?, events = events + 1 WHERE run_id = ? RETURNING events',
     );
     const insertEvent = this.db.prepare(
-      'INSERT OR IGNORE INTO flow_trace (run_id, seq, ts, from_id, from_port, to_id, to_port, data) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      'INSERT OR IGNORE INTO flow_trace (run_id, seq, ts, from_id, from_port, to_id, to_port, data, msg_id, prev_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
     );
     const run = this.db.transaction((evs: TraceEvent[]) => {
       let n = 0;
@@ -258,7 +265,7 @@ export class FlowTaskStore {
         const data = typeof e.data === 'string' ? e.data.slice(0, MAX_TRACE_DATA) : null;
         insertRun.run(e.run, flow, labelOf(data), ts, ts);
         const { events: seq } = bump.get(ts, e.run) as { events: number };
-        insertEvent.run(e.run, seq, ts, str(e.from), str(e.out), str(e.to), str(e.in), data);
+        insertEvent.run(e.run, seq, ts, str(e.from), str(e.out), str(e.to), str(e.in), data, str(e.mid), str(e.prev));
         n++;
       }
       return n;
@@ -305,6 +312,10 @@ export interface TraceEvent {
   to?: unknown;
   in?: unknown;
   data?: unknown;
+  /** id the recorder stamped on the delivered message */
+  mid?: unknown;
+  /** id of the message the sender was handling when it sent this one */
+  prev?: unknown;
 }
 export interface FlowRun {
   run_id: string;
@@ -323,6 +334,8 @@ export interface TraceRow {
   to_id: string | null;
   to_port: string | null;
   data: string | null;
+  msg_id: string | null;
+  prev_id: string | null;
 }
 
 const str = (v: unknown): string | null => (typeof v === 'string' && v.length > 0 ? v.slice(0, 200) : null);
