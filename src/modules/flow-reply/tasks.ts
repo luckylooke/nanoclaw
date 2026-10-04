@@ -97,6 +97,30 @@ export class FlowTaskStore {
       );
       CREATE INDEX IF NOT EXISTS idx_flow_tasks_thread
         ON flow_tasks(channel_type, platform_id, thread_id, status);
+
+      -- Run traces: every message one node sent to another, so a run can be
+      -- laid back over the diagram (which nodes, which ports, what went in and
+      -- out). Written by the Trace recorder component inside the flow.
+      CREATE TABLE IF NOT EXISTS flow_runs (
+        run_id     TEXT PRIMARY KEY,
+        flow       TEXT NOT NULL,
+        label      TEXT,
+        started_at TEXT NOT NULL,
+        last_at    TEXT NOT NULL,
+        events     INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE INDEX IF NOT EXISTS idx_flow_runs_last ON flow_runs(flow, last_at);
+      CREATE TABLE IF NOT EXISTS flow_trace (
+        run_id    TEXT NOT NULL,
+        seq       INTEGER NOT NULL,
+        ts        TEXT NOT NULL,
+        from_id   TEXT,
+        from_port TEXT,
+        to_id     TEXT,
+        to_port   TEXT,
+        data      TEXT,
+        PRIMARY KEY (run_id, seq)
+      );
     `);
   }
 
@@ -208,7 +232,107 @@ export class FlowTaskStore {
     return this.get(id) as FlowTask;
   }
 
+  /**
+   * Append recorder events. Each event: { run, ts, from, out, to, in, data } where
+   * data is already a (truncated) JSON string. A run's label is the first event's
+   * data.text, which for the entry message is what the person wrote. Runs older
+   * than TRACE_KEEP_DAYS are pruned on the way in — a trace is for debugging, and
+   * a debugging aid that grows without bound becomes a disk alert.
+   */
+  appendTrace(flow: string, events: TraceEvent[], now = new Date()): number {
+    const insertRun = this.db.prepare(
+      `INSERT INTO flow_runs (run_id, flow, label, started_at, last_at, events) VALUES (?, ?, ?, ?, ?, 0)
+       ON CONFLICT(run_id) DO NOTHING`,
+    );
+    const bump = this.db.prepare(
+      'UPDATE flow_runs SET last_at = ?, events = events + 1 WHERE run_id = ? RETURNING events',
+    );
+    const insertEvent = this.db.prepare(
+      'INSERT OR IGNORE INTO flow_trace (run_id, seq, ts, from_id, from_port, to_id, to_port, data) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+    );
+    const run = this.db.transaction((evs: TraceEvent[]) => {
+      let n = 0;
+      for (const e of evs) {
+        if (typeof e?.run !== 'string' || !e.run) throw new TaskInputError('every event needs a run id');
+        const ts = typeof e.ts === 'string' ? e.ts : now.toISOString();
+        const data = typeof e.data === 'string' ? e.data.slice(0, MAX_TRACE_DATA) : null;
+        insertRun.run(e.run, flow, labelOf(data), ts, ts);
+        const { events: seq } = bump.get(ts, e.run) as { events: number };
+        insertEvent.run(e.run, seq, ts, str(e.from), str(e.out), str(e.to), str(e.in), data);
+        n++;
+      }
+      return n;
+    });
+    const n = run(events);
+    const cutoff = new Date(now.getTime() - TRACE_KEEP_DAYS * 86400_000).toISOString();
+    const old = this.db.prepare('SELECT run_id FROM flow_runs WHERE last_at < ?').all(cutoff) as { run_id: string }[];
+    for (const { run_id } of old) {
+      this.db.prepare('DELETE FROM flow_trace WHERE run_id = ?').run(run_id);
+      this.db.prepare('DELETE FROM flow_runs WHERE run_id = ?').run(run_id);
+    }
+    return n;
+  }
+
+  listRuns(flow: string | null, limit = 50): FlowRun[] {
+    const lim = Math.max(1, Math.min(200, Math.floor(limit) || 50));
+    return (
+      flow
+        ? this.db.prepare('SELECT * FROM flow_runs WHERE flow = ? ORDER BY last_at DESC LIMIT ?').all(flow, lim)
+        : this.db.prepare('SELECT * FROM flow_runs ORDER BY last_at DESC LIMIT ?').all(lim)
+    ) as FlowRun[];
+  }
+
+  getRun(runId: string): { run: FlowRun; events: TraceRow[] } | null {
+    const run = this.db.prepare('SELECT * FROM flow_runs WHERE run_id = ?').get(runId) as FlowRun | undefined;
+    if (!run) return null;
+    const events = this.db.prepare('SELECT * FROM flow_trace WHERE run_id = ? ORDER BY seq').all(runId) as TraceRow[];
+    return { run, events };
+  }
+
   close(): void {
     this.db.close();
+  }
+}
+
+export const TRACE_KEEP_DAYS = 7;
+const MAX_TRACE_DATA = 16_000;
+
+export interface TraceEvent {
+  run?: unknown;
+  ts?: unknown;
+  from?: unknown;
+  out?: unknown;
+  to?: unknown;
+  in?: unknown;
+  data?: unknown;
+}
+export interface FlowRun {
+  run_id: string;
+  flow: string;
+  label: string | null;
+  started_at: string;
+  last_at: string;
+  events: number;
+}
+export interface TraceRow {
+  run_id: string;
+  seq: number;
+  ts: string;
+  from_id: string | null;
+  from_port: string | null;
+  to_id: string | null;
+  to_port: string | null;
+  data: string | null;
+}
+
+const str = (v: unknown): string | null => (typeof v === 'string' && v.length > 0 ? v.slice(0, 200) : null);
+
+function labelOf(data: string | null): string | null {
+  if (!data) return null;
+  try {
+    const d = JSON.parse(data) as { text?: unknown };
+    return typeof d?.text === 'string' ? d.text.slice(0, 160) : null;
+  } catch {
+    return null;
   }
 }
