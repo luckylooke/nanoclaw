@@ -7,6 +7,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
+import Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { FlowTaskStore, TRACE_KEEP_DAYS } from './tasks.js';
@@ -73,6 +74,30 @@ describe('flow traces', () => {
     store.appendTrace('fJX', [ev('fresh', 'a', 'output', 'b', 'input', {})], new Date('2026-10-03T16:06:00Z'));
     expect(store.getRun('ancient')).toBeNull();
     expect(store.getRun('fresh')).not.toBeNull();
+  });
+
+  it('keeps the message ids that tie an output to the run of the node that sent it', () => {
+    store.appendTrace('fJX', [
+      { ...ev('r2', 'n_a', 'output', 'n_b', 'input', {}), mid: 'm1' },
+      { ...ev('r2', 'n_b', 'output', 'n_c', 'input', {}), mid: 'm2', prev: 'm1' },
+    ]);
+    expect(store.getRun('r2')!.events.map((e) => [e.msg_id, e.prev_id])).toEqual([
+      ['m1', null],
+      ['m2', 'm1'],
+    ]);
+  });
+
+  it('adds the id columns to a trace table created before they existed', () => {
+    store.close();
+    const file = path.join(tmp, 'old.db');
+    const old = new Database(file);
+    old.exec(
+      'CREATE TABLE flow_trace (run_id TEXT NOT NULL, seq INTEGER NOT NULL, ts TEXT NOT NULL, from_id TEXT, from_port TEXT, to_id TEXT, to_port TEXT, data TEXT, PRIMARY KEY (run_id, seq))',
+    );
+    old.close();
+    store = new FlowTaskStore(file);
+    store.appendTrace('fJX', [{ ...ev('r3', 'a', 'output', 'b', 'input', {}), mid: 'x' }]);
+    expect(store.getRun('r3')!.events[0].msg_id).toBe('x');
   });
 
   it('truncates oversized data and rejects an event without a run id', () => {
