@@ -18,7 +18,14 @@
  * The brief asks the agent to end its last message with `[[flow:done <key>]]` or
  * `[[flow:blocked <key>]]`; on that marker the job is closed and the flow is
  * called back (FLOW_AGENT_CALLBACK_URL) with the agent's final message. Progress
- * messages without a marker are ignored. A failed callback is recorded on the job
+ * messages without a marker are ignored.
+ * Two more markers serve the clarification detour (Ctibor, 2026-10-04: the
+ * person and the agent settle open decisions in the agent's thread, with no
+ * round limit, and only the end reaches the flow): `[[flow:ask <key>]]` tells
+ * the flow the agent asked the person something — the job stays running and the
+ * discussion continues in the thread without the flow; `[[flow:clarified <key>]]`
+ * closes a clarification job with the confirmed decisions.
+ * A failed callback is recorded on the job
  * and visible via /flow-agent/job, never retried blindly.
  */
 import type { InboundEvent } from '../../channels/adapter.js';
@@ -31,7 +38,7 @@ export const FLOW_AGENT_CALLBACK_URL =
 export const AGENTS = ['dev-web', 'dev-game'];
 const KEY = /^[a-z0-9]{4,32}$/;
 const MAX_BRIEF = 20_000;
-const MARKER = /\[\[flow:(done|blocked)\s+([a-z0-9]{4,32})\]\]/i;
+const MARKER = /\[\[flow:(done|blocked|ask|clarified)\s+([a-z0-9]{4,32})\]\]/i;
 
 export interface AgentChannel {
   channel_type: string;
@@ -128,6 +135,9 @@ export async function dispatch(
         author: { userId: owner, fullName: 'Flow (for the owner)' },
         senderId: owner,
         sender: 'Flow',
+        // Marks the flow's own hand-off, so the continuation interceptor never
+        // mistakes a job's first brief for a reply after a session reset.
+        flowDispatch: true,
       }),
       timestamp: new Date().toISOString(),
       isMention: true,
@@ -136,6 +146,39 @@ export async function dispatch(
   });
   log.info('Flow agent job dispatched', { key, agent, thread: threadId });
   return { thread_id: threadId, platform_id: channel.platform_id, message_id: ts ?? null };
+}
+
+/**
+ * The person cancelled the task while the agent was on it: say so in the job's
+ * thread and close the job. Two test threads on the same topic got answered in
+ * the wrong one (2026-10-11/12) because nothing in the old thread said it was over.
+ */
+export async function cancelJob(
+  body: { key?: unknown },
+  deps: Pick<DispatchDeps, 'store' | 'getAdapter' | 'agentChannel'>,
+): Promise<{ cancelled: boolean; thread_id?: string }> {
+  const key = typeof body.key === 'string' ? body.key : '';
+  if (!KEY.test(key)) throw new DispatchError('key must be 4–32 lowercase letters or digits', 400);
+  const job = deps.store().getJob(key);
+  if (!job || job.status !== 'running') return { cancelled: false };
+  const channel = await deps.agentChannel(job.agent);
+  const adapter = deps.getAdapter();
+  if (channel && adapter && channel.platform_id === job.platform_id) {
+    await adapter.deliver(
+      channel.channel_type,
+      channel.platform_id,
+      job.thread_id,
+      'chat',
+      JSON.stringify({
+        text: `❌ *Flow task \`${key}\` was cancelled* by the project manager. Stop working on it; nothing more is needed in this thread.`,
+      }),
+      undefined,
+      channel.instance,
+    );
+  }
+  deps.store().finishJob(key, 'cancelled', 'cancelled by the person');
+  log.info('Flow agent job cancelled', { key, thread: job.thread_id });
+  return { cancelled: true, thread_id: job.thread_id };
 }
 
 export interface CompletionDeps {
@@ -160,8 +203,18 @@ export async function onAgentMessage(
   }
   const m = MARKER.exec(text);
   if (!m || m[2].toLowerCase() !== job.key) return;
-  const status = m[1].toLowerCase() as 'done' | 'blocked';
-  deps.store().finishJob(job.key, status, text);
+  let status = m[1].toLowerCase() as 'done' | 'blocked' | 'ask' | 'clarified';
+  // A clarification closes only on decisions the person has already confirmed.
+  // A message that still asks ("Pokračujem?") is the summary, not the
+  // confirmation: twice on 2026-10-04/11 the agent put the marker under its own
+  // question, so the brief alone does not hold it. Treat it as a question — the
+  // job stays open and the agent sends the marker again after the yes.
+  if (status === 'clarified' && /\?/.test(text.replace(MARKER, ''))) {
+    status = 'ask';
+    deps.store().setAwaitingConfirmation(job.key, true);
+  }
+  // A question keeps the job open: the answer goes to the agent, not to the flow.
+  if (status !== 'ask') deps.store().finishJob(job.key, status === 'blocked' ? 'blocked' : 'done', text);
   try {
     const code = await deps.post(FLOW_AGENT_CALLBACK_URL, {
       key: job.key,

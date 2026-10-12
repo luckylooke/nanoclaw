@@ -146,6 +146,10 @@ export class FlowTaskStore {
     const cols = (this.db.prepare('PRAGMA table_info(flow_trace)').all() as { name: string }[]).map((c) => c.name);
     if (!cols.includes('msg_id')) this.db.exec('ALTER TABLE flow_trace ADD COLUMN msg_id TEXT');
     if (!cols.includes('prev_id')) this.db.exec('ALTER TABLE flow_trace ADD COLUMN prev_id TEXT');
+    const jobCols = (this.db.prepare('PRAGMA table_info(flow_jobs)').all() as { name: string }[]).map((c) => c.name);
+    if (!jobCols.includes('awaiting_confirmation')) {
+      this.db.exec('ALTER TABLE flow_jobs ADD COLUMN awaiting_confirmation INTEGER NOT NULL DEFAULT 0');
+    }
   }
 
   get(id: string): FlowTask | null {
@@ -337,6 +341,11 @@ export class FlowTaskStore {
     return this.getJob(job.key) as FlowJob;
   }
 
+  /** True for any thread a flow job ever ran in — those threads are work orders, isolated from their siblings. */
+  isJobThread(threadId: string): boolean {
+    return !!this.db.prepare('SELECT 1 FROM flow_jobs WHERE thread_id = ? LIMIT 1').get(threadId);
+  }
+
   getJob(key: string): FlowJob | null {
     return (this.db.prepare('SELECT * FROM flow_jobs WHERE key = ?').get(key) as FlowJob | undefined) ?? null;
   }
@@ -349,10 +358,15 @@ export class FlowTaskStore {
     );
   }
 
-  finishJob(key: string, status: 'done' | 'blocked', result: string): void {
+  finishJob(key: string, status: 'done' | 'blocked' | 'cancelled', result: string): void {
     this.db
       .prepare("UPDATE flow_jobs SET status = ?, result = ?, finished_at = ? WHERE key = ? AND status = 'running'")
       .run(status, result.slice(0, 20000), new Date().toISOString(), key);
+  }
+
+  /** The agent summarised a clarification and asked; the person's next message is the answer to that. */
+  setAwaitingConfirmation(key: string, on: boolean): void {
+    this.db.prepare('UPDATE flow_jobs SET awaiting_confirmation = ? WHERE key = ?').run(on ? 1 : 0, key);
   }
 
   noteCallback(key: string, outcome: string): void {
@@ -369,11 +383,12 @@ export interface FlowJob {
   agent: string;
   platform_id: string;
   thread_id: string;
-  status: 'running' | 'done' | 'blocked';
+  status: 'running' | 'done' | 'blocked' | 'cancelled';
   created_at: string;
   finished_at: string | null;
   result: string | null;
   callback: string | null;
+  awaiting_confirmation?: number;
 }
 
 export const TRACE_KEEP_DAYS = 7;

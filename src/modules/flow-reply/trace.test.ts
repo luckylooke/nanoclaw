@@ -30,7 +30,8 @@ const ev = (
   to: string,
   inp: string,
   data: unknown,
-  ts = '2026-10-03T16:06:00.000Z',
+  // Relative to now: a fixed date ages past TRACE_KEEP_DAYS and the store prunes it (failed on 2026-10-11).
+  ts = new Date(Date.now() - 60_000).toISOString(),
 ) => ({
   run,
   ts,
@@ -59,8 +60,12 @@ describe('flow traces', () => {
   });
 
   it('lists the newest runs first, per flow', () => {
-    store.appendTrace('fJX', [ev('old', 'a', 'output', 'b', 'input', {}, '2026-10-03T10:00:00.000Z')]);
-    store.appendTrace('fJX', [ev('new', 'a', 'output', 'b', 'input', {}, '2026-10-03T11:00:00.000Z')]);
+    store.appendTrace('fJX', [
+      ev('old', 'a', 'output', 'b', 'input', {}, new Date(Date.now() - 2 * 3600_000).toISOString()),
+    ]);
+    store.appendTrace('fJX', [
+      ev('new', 'a', 'output', 'b', 'input', {}, new Date(Date.now() - 3600_000).toISOString()),
+    ]);
     store.appendTrace('other', [ev('x', 'a', 'output', 'b', 'input', {})]);
     expect(store.listRuns('fJX').map((r) => r.run_id)).toEqual(['new', 'old']);
   });
