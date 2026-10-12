@@ -27,7 +27,7 @@ import {
   getMessagingGroupAgents,
   getMessagingGroupWithAgentCount,
 } from './db/messaging-groups.js';
-import { findSessionForAgent } from './db/sessions.js';
+import { findSessionForAgent, threadEverEngaged } from './db/sessions.js';
 import { backfillSession, fanInboundMessage } from './modules/cross-session-context/index.js';
 import { startTypingRefresh, stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
@@ -469,7 +469,7 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
  *                      user wants to disambiguate between multiple agents
  *                      wired to one chat, use engage_mode='pattern' with
  *                      the disambiguator as the regex.
- *   'mention-sticky' — platform mention OR an active per-thread session
+ *   'mention-sticky' — platform mention OR a per-thread session (active, or closed by the nightly reset)
  *                      already exists for this (agent, mg, thread). The
  *                      session existence IS our subscription state; once
  *                      a thread has engaged us once, follow-ups arrive
@@ -501,7 +501,9 @@ async function evaluateEngage(
       // — the thread was activated before, keep firing.
       if (mg.is_group === 0) return false; // DMs never use mention-sticky sensibly
       const existing = await findSessionForAgent(agent.agent_group_id, mg.id, threadId);
-      return existing !== undefined;
+      if (existing !== undefined) return true;
+      // The nightly session reset must not unsubscribe a thread the agent was in.
+      return threadId !== null && (await threadEverEngaged(agent.agent_group_id, mg.id, threadId));
     }
     default:
       // Unrecognized engage_mode (e.g. stale data from a past CLI version,
