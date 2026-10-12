@@ -59,6 +59,26 @@ export async function findSessionForAgent(
   );
 }
 
+/**
+ * True when the agent has ever had a session on this thread, closed ones
+ * included. daily-reset closes every Slack session at night on purpose; a
+ * thread the agent was part of must still count as engaged the next day, or a
+ * reply without a mention is silently not delivered (2026-10-11).
+ */
+export async function threadEverEngaged(
+  agentGroupId: string,
+  messagingGroupId: string,
+  threadId: string,
+): Promise<boolean> {
+  const row = await getDb().get<{ one: number }>(
+    'SELECT 1 AS one FROM sessions WHERE agent_group_id = ? AND messaging_group_id = ? AND thread_id = ? LIMIT 1',
+    agentGroupId,
+    messagingGroupId,
+    threadId,
+  );
+  return row !== undefined;
+}
+
 /** Find an active session scoped to an agent group (ignoring messaging group). */
 export async function findSessionByAgentGroup(agentGroupId: string): Promise<Session | undefined> {
   return getDb().get<Session>(

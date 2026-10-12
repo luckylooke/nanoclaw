@@ -211,6 +211,26 @@ describe('registerSessionCreatedHook', () => {
     expect(events[0].threadId).toBe('testchat:C1:333');
   });
 
+  it('mention-sticky: a thread stays engaged after its session was closed by the nightly reset', async () => {
+    await activate();
+    await seedWiring({ isGroup: 1, engageMode: 'mention-sticky', engagePattern: null, sessionMode: 'per-thread' });
+    const events: SessionCreatedEvent[] = [];
+    registerSessionCreatedHook((event) => {
+      events.push(event);
+    });
+    await inbound('m1', 'testchat:C1:777', 'hey bot', true);
+    expect(events).toHaveLength(1);
+    const { updateSession } = await import('./db/sessions.js');
+    await updateSession(events[0].session.id, { status: 'closed' });
+    // next day, a reply without a mention: a new session, and it is engaged (woken)
+    await inbound('m2', 'testchat:C1:777', 'answer without mention', false);
+    expect(events).toHaveLength(2);
+    expect(events[1].session.id).not.toBe(events[0].session.id);
+    // a thread the agent was never in still needs a mention
+    await inbound('m3', 'testchat:C1:888', 'unrelated', false);
+    expect(events).toHaveLength(2);
+  });
+
   it('a throwing hook (sync or async) never breaks routing', async () => {
     await activate();
     await seedWiring({ sessionMode: 'per-thread' });
