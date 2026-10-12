@@ -22,6 +22,7 @@
  * seq → the formatter renders them first, as ambient context). Never throws.
  */
 import { isTaskThread } from '../../db/sessions.js';
+import { isIsolatedThread } from './isolation.js';
 import { log } from '../../log.js';
 import { withExistingMailboxSession } from '../../session-manager.js';
 import type { AgentGroup, MessagingGroup, Session } from '../../types.js';
@@ -129,6 +130,7 @@ export async function backfillSession(
 ): Promise<void> {
   try {
     if (session.thread_id !== null && isTaskThread(session.thread_id)) return;
+    if (isIsolatedThread(session.thread_id)) return;
     const now = options.now ?? Date.now();
 
     const candidates = await loadHotCandidates(agentGroup.id, mg.id, now);
