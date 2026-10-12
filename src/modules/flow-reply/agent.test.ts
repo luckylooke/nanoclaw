@@ -82,6 +82,19 @@ describe('dispatch', () => {
     expect(store.getJob('abcd1234')?.status).toBe('running');
   });
 
+  it("a later step of the same task goes into the task's existing thread, not a new one", async () => {
+    const { d, deliver, route } = deps();
+    const first = await dispatch({ key: 'tt66tt66', agent: 'dev-web', text: 'clarify the spec' }, d);
+    store.finishJob('tt66tt66', 'done', 'decisions');
+    const next = await dispatch({ key: 'tt66tt66', agent: 'dev-web', text: 'clarify the design' }, d);
+    expect(next.thread_id).toBe(first.thread_id);
+    expect(deliver.mock.calls[0][2]).toBeNull();
+    expect(deliver.mock.calls[1][2]).toBe(first.thread_id);
+    expect(String(deliver.mock.calls[1][4])).toMatch(/next step/);
+    expect(route.mock.calls[1][0].threadId).toBe(first.thread_id);
+    expect(store.getJob('tt66tt66')?.status).toBe('running');
+  });
+
   it('refuses bad input before touching any channel', async () => {
     const { d, deliver } = deps();
     await expect(dispatch({ key: 'BAD KEY', agent: 'dev-web', text: 'x' }, d)).rejects.toThrow(DispatchError);

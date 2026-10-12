@@ -104,21 +104,39 @@ export async function dispatch(
   } else {
     // A second start while the agent still works would orphan its thread: the
     // completion marker there would no longer match any running job.
-    if (deps.store().getJob(key)?.status === 'running') {
+    const previous = deps.store().getJob(key);
+    if (previous?.status === 'running') {
       throw new DispatchError(`job ${key} is still running; continue it instead`, 409);
     }
-    const header = `🔧 *Flow task \`${key}\`* — handed over by the development flow.`;
-    ts = await adapter.deliver(
-      channel.channel_type,
-      channel.platform_id,
-      null,
-      'chat',
-      JSON.stringify({ text: `${header}\n\n${text}` }),
-      undefined,
-      channel.instance,
-    );
-    if (!ts) throw new DispatchError('the channel returned no message id, so there is no thread to work in', 502);
-    threadId = `${channel.platform_id}:${ts}`;
+    if (previous && previous.agent === agent && previous.platform_id === channel.platform_id) {
+      // One task, one thread in the agent's channel: every later step of the task
+      // (the next clarification, the implementation) goes where the earlier ones
+      // are. A new thread per step made Ctibor read the same context again and
+      // again, and answer in the wrong one (2026-10-12).
+      threadId = previous.thread_id;
+      ts = await adapter.deliver(
+        channel.channel_type,
+        channel.platform_id,
+        threadId,
+        'chat',
+        JSON.stringify({ text: `🔧 *Flow task \`${key}\`* — next step.\n\n${text}` }),
+        undefined,
+        channel.instance,
+      );
+    } else {
+      const header = `🔧 *Flow task \`${key}\`* — handed over by the development flow.`;
+      ts = await adapter.deliver(
+        channel.channel_type,
+        channel.platform_id,
+        null,
+        'chat',
+        JSON.stringify({ text: `${header}\n\n${text}` }),
+        undefined,
+        channel.instance,
+      );
+      if (!ts) throw new DispatchError('the channel returned no message id, so there is no thread to work in', 502);
+      threadId = `${channel.platform_id}:${ts}`;
+    }
   }
   deps.store().startJob({ key, agent, platform_id: channel.platform_id, thread_id: threadId });
 
