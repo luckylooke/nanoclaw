@@ -42,6 +42,7 @@ export {
   type EchoTargetCandidate,
   type EchoWireSurface,
 } from './fan.js';
+export { isIsolatedThread, registerIsolatedThreads } from './isolation.js';
 export { mapConcurrent } from './parallel.js';
 export { pruneEchoBacklog } from './prune.js';
 export {

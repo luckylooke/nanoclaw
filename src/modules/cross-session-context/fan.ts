@@ -52,6 +52,7 @@ import {
   ECHO_TEXT_MAX_CHARS,
   HOT_SESSION_LIMIT,
 } from './config.js';
+import { isIsolatedThread } from './isolation.js';
 import { mapConcurrent } from './parallel.js';
 
 /** Surface values that appear on the wire in echo.{surface}: the sibling-
@@ -161,7 +162,7 @@ export function selectEchoTargets<T extends EchoTargetCandidate>(
   nowMs: number = Date.now(),
 ): T[] {
   return selectHotSessions(
-    candidates.filter((s) => s.id !== sourceSessionId),
+    candidates.filter((s) => s.id !== sourceSessionId && !isIsolatedThread(s.thread_id)),
     sourceMessagingGroupId,
     nowMs,
   );
@@ -325,6 +326,7 @@ async function fanInbound(args: Parameters<typeof fanInboundMessage>[0]): Promis
     if (args.channelType === 'agent' || args.channelType === ECHO_CHANNEL_TYPE) return 0;
     // Task sessions are never a SOURCE (their traffic is series-internal).
     if (isTaskThread(session.thread_id)) return 0;
+    if (isIsolatedThread(session.thread_id)) return 0;
     const parsed = parseContent(args.content);
     if (!parsed.text) return 0;
     // Targets are always sibling threads of the conversation the message
@@ -382,6 +384,7 @@ async function fanOutbound(
     if (msg.kind === 'system' || msg.kind === 'task_log') return 0;
     if (!msg.channel_type || !msg.platform_id) return 0;
     if (msg.channel_type === 'agent' || msg.channel_type === ECHO_CHANNEL_TYPE) return 0;
+    if (isIsolatedThread(session.thread_id)) return 0;
     const isTaskSource = isTaskThread(session.thread_id);
 
     const originMg = session.messaging_group_id ? await getMessagingGroup(session.messaging_group_id) : undefined;
