@@ -45,6 +45,15 @@ describe('blockText', () => {
     expect(blockText('<@U1> ab', formatted)).toBeNull();
   });
 
+  it('keeps an answer that was only a list marker ("1." reached the agent empty, 2026-10-12)', () => {
+    const formatted = {
+      type: 'root',
+      children: [{ type: 'list', ordered: true, start: 1, children: [{ type: 'listItem', children: [] }] }],
+    };
+    expect(blockText('', formatted)).toBe('1.');
+    expect(blockText('', { type: 'root', children: [] })).toBeNull();
+  });
+
   it('leaves a single paragraph, a missing tree and empty text alone', () => {
     expect(blockText('hello world', { type: 'root', children: [p(t('hello world'))] })).toBeNull();
     expect(blockText('hello', undefined)).toBeNull();

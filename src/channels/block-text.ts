@@ -69,10 +69,21 @@ function render(node: Node): string {
  * The text with its block line breaks restored, or null when the tree is
  * missing, has no block boundaries, or does not match the text exactly.
  */
+function hasList(node: Node): boolean {
+  return node.type === 'list' || (node.children || []).some(hasList);
+}
+
 export function blockText(text: unknown, formatted: unknown): string | null {
-  if (typeof text !== 'string' || !text || !formatted || typeof formatted !== 'object') return null;
+  if (typeof text !== 'string' || !formatted || typeof formatted !== 'object') return null;
   const root = formatted as Node;
-  if (root.type !== 'root' || !hasBlockBoundary(root)) return null;
+  if (root.type !== 'root') return null;
+  // "1." alone parses as a list with one EMPTY item, and the text comes out empty:
+  // Ctibor's answer "1." reached the agent as nothing (2026-10-12). The markers are the message.
+  if (text === '') {
+    if (!hasList(root) || flatText(root) !== '') return null;
+    return render(root).trim() || null;
+  }
+  if (!hasBlockBoundary(root)) return null;
   if (flatText(root) !== text) return null;
   const rebuilt = render(root);
   return rebuilt !== text ? rebuilt : null;
