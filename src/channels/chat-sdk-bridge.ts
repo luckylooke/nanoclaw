@@ -27,6 +27,7 @@ import { registerWebhookAdapter } from '../webhook-server.js';
 import { normalizeOptions, type NormalizedOption } from './ask-question.js';
 import type { ChannelAdapter, ChannelDefaults, ChannelSetup, InboundMessage } from './adapter.js';
 import { INSTANCE_KEY_RE } from './channel-registry.js';
+import { blockText } from './block-text.js';
 import { resolveQuestionRender, dispatchQuestionAction } from './question-render-registry.js';
 
 /** Adapter with optional gateway support (e.g., Discord). */
@@ -489,6 +490,10 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
   ): Promise<InboundMessage> {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const serialized = message.toJSON() as Record<string, any>;
+    // The SDK glues list items and paragraphs together in `text`; rebuild the
+    // line breaks from the parsed tree when that is provably all that differs.
+    const withBreaks = blockText(serialized.text, serialized.formatted);
+    if (withBreaks) serialized.text = withBreaks;
 
     // Download attachment data before serialization loses fetchData()
     if (message.attachments && message.attachments.length > 0) {
