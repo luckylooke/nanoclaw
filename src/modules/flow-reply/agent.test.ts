@@ -14,7 +14,7 @@ import path from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { InboundEvent } from '../../channels/adapter.js';
-import { dispatch, DispatchError, onAgentMessage, type DispatchDeps } from './agent.js';
+import { cancelJob, dispatch, DispatchError, onAgentMessage, type DispatchDeps } from './agent.js';
 import { FlowTaskStore } from './tasks.js';
 
 let tmp: string;
@@ -92,6 +92,25 @@ describe('dispatch', () => {
   });
 });
 
+describe('cancel', () => {
+  it('tells the agent in its thread and closes the job; nothing to do for an unknown or finished job', async () => {
+    const { d, deliver } = deps();
+    const r = await dispatch({ key: 'xx44xx44', agent: 'dev-web', text: 'clarify' }, d);
+    expect(await cancelJob({ key: 'xx44xx44' }, d)).toEqual({ cancelled: true, thread_id: r.thread_id });
+    expect(deliver.mock.calls[1][2]).toBe(r.thread_id);
+    expect(String(deliver.mock.calls[1][4])).toMatch(/was cancelled/);
+    expect(store.getJob('xx44xx44')?.status).toBe('cancelled');
+    expect(await cancelJob({ key: 'xx44xx44' }, d)).toEqual({ cancelled: false });
+    expect(await cancelJob({ key: 'nope0000' }, d)).toEqual({ cancelled: false });
+  });
+
+  it('marks its own hand-off so it is never taken for a reply after a reset', async () => {
+    const { d, route } = deps();
+    await dispatch({ key: 'yy55yy55', agent: 'dev-web', text: 'brief' }, d);
+    expect(JSON.parse(route.mock.calls[0][0].message.content).flowDispatch).toBe(true);
+  });
+});
+
 describe('completion hook', () => {
   const content = (text: string) => JSON.stringify({ text });
   it("closes the job and calls the flow back only on the job's own marker", async () => {
@@ -117,6 +136,55 @@ describe('completion hook', () => {
       d,
     );
     expect(post).toHaveBeenCalledTimes(1);
+  });
+
+  it('a question keeps the job running; a clarification closes it', async () => {
+    store.startJob({ key: 'qq11qq11', agent: 'dev-web', platform_id: 'slack:C1', thread_id: 'slack:C1:5.5' });
+    const post = vi.fn(async (_u: string, _b: unknown) => 200);
+    const d = { store: () => store, post };
+    await onAgentMessage(
+      { platformId: 'slack:C1', threadId: 'slack:C1:5.5', content: content('1. Which text?\n[[flow:ask qq11qq11]]') },
+      d,
+    );
+    expect(post.mock.calls[0][1]).toMatchObject({ key: 'qq11qq11', status: 'ask' });
+    expect(store.getJob('qq11qq11')?.status).toBe('running');
+    await onAgentMessage(
+      {
+        platformId: 'slack:C1',
+        threadId: 'slack:C1:5.5',
+        content: content('- text Instagram\n[[flow:clarified qq11qq11]]'),
+      },
+      d,
+    );
+    expect(post.mock.calls[1][1]).toMatchObject({ status: 'clarified' });
+    expect(store.getJob('qq11qq11')?.status).toBe('done');
+  });
+
+  it('a clarified marker under a question is the summary, not the confirmation', async () => {
+    store.startJob({ key: 'cc33cc33', agent: 'dev-web', platform_id: 'slack:C1', thread_id: 'slack:C1:6.6' });
+    const post = vi.fn(async (_u: string, _b: unknown) => 200);
+    const d = { store: () => store, post };
+    await onAgentMessage(
+      {
+        platformId: 'slack:C1',
+        threadId: 'slack:C1:6.6',
+        content: content('- footer\n- /kontakt\nPokračujem?\n[[flow:clarified cc33cc33]]'),
+      },
+      d,
+    );
+    expect(post.mock.calls[0][1]).toMatchObject({ status: 'ask' });
+    expect(store.getJob('cc33cc33')?.status).toBe('running');
+    expect(store.getJob('cc33cc33')?.awaiting_confirmation).toBe(1);
+    await onAgentMessage(
+      {
+        platformId: 'slack:C1',
+        threadId: 'slack:C1:6.6',
+        content: content('- footer\n- /kontakt\n[[flow:clarified cc33cc33]]'),
+      },
+      d,
+    );
+    expect(post.mock.calls[1][1]).toMatchObject({ status: 'clarified' });
+    expect(store.getJob('cc33cc33')?.status).toBe('done');
   });
 
   it('reports blocked, and records a failed callback instead of losing it', async () => {

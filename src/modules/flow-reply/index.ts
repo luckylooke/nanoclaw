@@ -9,6 +9,7 @@
  *   POST /flow-task/find-key  the open task carrying a flow key (an agent finished)
  *   POST /flow-agent/dispatch hand a phase to a dev agent (agent.ts)
  *   POST /flow-agent/job      the state of that hand-off
+ *   POST /flow-agent/cancel   tell the agent its task was cancelled and close the job
  *
  * Reply: the flow gets the inbound message with its address — channel_type,
  * platform_id, thread_id, instance — and hands it back with the text. The
@@ -39,8 +40,11 @@ import { getMessagingGroupByPlatform } from '../../db/messaging-groups.js';
 import { getDeliveryAdapter, registerPostDeliveryHook, type ChannelDeliveryAdapter } from '../../delivery.js';
 import { log } from '../../log.js';
 import { routeInbound } from '../../router.js';
+import { registerIsolatedThreads } from '../cross-session-context/index.js';
 import { getOwners } from '../permissions/db/user-roles.js';
-import { dispatch, DispatchError, onAgentMessage, type AgentChannel, type DispatchDeps } from './agent.js';
+import { cancelJob, dispatch, DispatchError, onAgentMessage, type AgentChannel, type DispatchDeps } from './agent.js';
+import { makeContinuationInterceptor } from './continuation.js';
+import { registerMessageInterceptor } from '../../router.js';
 import type { MessagingGroup } from '../../types.js';
 import { registerFlowInbound } from './inbound.js';
 import { FlowTaskStore, TaskInputError, type TraceEvent } from './tasks.js';
@@ -272,11 +276,14 @@ export function makeFlowTaskHandler(getStore: () => FlowTaskStore) {
 
 export function makeFlowAgentHandler(deps: DispatchDeps) {
   return async (req: http.IncomingMessage, res: http.ServerResponse): Promise<void> => {
-    if ((req.url || '').split('?')[0] !== '/flow-agent/dispatch')
+    const route = (req.url || '').split('?')[0];
+    if (route !== '/flow-agent/dispatch' && route !== '/flow-agent/cancel') {
       return send(res, 404, { ok: false, error: 'not found' });
+    }
     const body = await admit(req, res);
     if (!body) return;
     try {
+      if (route === '/flow-agent/cancel') return send(res, 200, { ok: true, ...(await cancelJob(body, deps)) });
       return send(res, 200, { ok: true, ...(await dispatch(body, deps)) });
     } catch (err) {
       if (err instanceof DispatchError) return send(res, err.status, { ok: false, error: err.message });
@@ -347,7 +354,7 @@ export function startFlowReplyServer(port = FLOW_REPLY_PORT): http.Server {
   });
   server = http.createServer((req, res) => {
     const route = (req.url || '').split('?')[0];
-    if (route === '/flow-agent/dispatch') return void agents(req, res);
+    if (route === '/flow-agent/dispatch' || route === '/flow-agent/cancel') return void agents(req, res);
     const isTask = route.startsWith('/flow-task/') || route.startsWith('/flow-trace/') || route === '/flow-agent/job';
     void (isTask ? tasks(req, res) : reply(req, res));
   });
@@ -364,4 +371,23 @@ if (!process.env.VITEST) {
   registerFlowInbound(getFlowTaskStore);
   // An agent's reply carrying [[flow:done|blocked <key>]] on a job thread calls the flow back.
   registerPostDeliveryHook((msg) => onAgentMessage(msg, { store: getFlowTaskStore, post: postJson }));
+  // A flow job's thread is one task; sibling echoes mixed two tasks on 2026-10-04.
+  registerIsolatedThreads((threadId) => getFlowTaskStore().isJobThread(threadId));
+  // A job thread outlives the nightly session reset: wake the agent with a pointer, not the whole thread.
+  registerMessageInterceptor(
+    makeContinuationInterceptor({
+      store: getFlowTaskStore,
+      sessionState: async (platformId, threadId) => {
+        const rows = await getDb().all<{ status: string }>(
+          `SELECT s.status FROM sessions s JOIN messaging_groups mg ON mg.id = s.messaging_group_id
+            WHERE mg.platform_id = ? AND s.thread_id = ?`,
+          platformId,
+          threadId,
+        );
+        if (rows.some((r) => r.status === 'active')) return 'active';
+        return rows.length ? 'closed' : 'none';
+      },
+      route: routeInbound,
+    }),
+  );
 }
