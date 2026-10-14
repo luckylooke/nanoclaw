@@ -7,6 +7,7 @@
  *   POST /flow-task/find-open the open task on a thread, if any
  *   POST /flow-task/update    move a task on: status, step, attempt, data, event
  *   POST /flow-task/find-key  the open task carrying a flow key (an agent finished)
+ *   POST /flow-task/list-open the open tasks of a flow, for triage (key, title, project, step)
  *   POST /flow-agent/dispatch hand a phase to a dev agent (agent.ts)
  *   POST /flow-agent/job      the state of that hand-off
  *   POST /flow-agent/cancel   tell the agent its task was cancelled and close the job
@@ -193,6 +194,7 @@ export function makeFlowTaskHandler(getStore: () => FlowTaskStore) {
       '/flow-task/find-open',
       '/flow-task/update',
       '/flow-task/find-key',
+      '/flow-task/list-open',
       '/flow-agent/job',
       '/flow-trace/append',
       '/flow-trace/runs',
@@ -224,6 +226,11 @@ export function makeFlowTaskHandler(getStore: () => FlowTaskStore) {
         return route === '/flow-agent/job'
           ? send(res, 200, { ok: true, job: store.getJob(key) })
           : send(res, 200, { ok: true, task: store.findOpenByKey(key) });
+      }
+      if (route === '/flow-task/list-open') {
+        const flow = str(body.flow);
+        if (!flow) return send(res, 400, { ok: false, error: 'flow is required' });
+        return send(res, 200, { ok: true, tasks: store.listOpen(flow) });
       }
       if (route === '/flow-task/find-open') {
         const channelType = str(body.channel_type);

@@ -96,6 +96,65 @@ describe('FlowTaskStore', () => {
     expect(h[49].i).toBe(59);
   });
 
+  it('a task being written is open: a reply on its thread finds it, and so does its key', () => {
+    const t = store.create({
+      flow: 'inbound',
+      step: 'intake',
+      status: 'writing',
+      ...ADDR,
+      thread_id: THREAD,
+      data: { key: 'k1' },
+    });
+    expect(store.findOpen('slack', 'slack:C0B6B8A1MEV', THREAD)?.id).toBe(t.id);
+    expect(store.findOpenByKey('k1')?.id).toBe(t.id);
+  });
+
+  it('lists the open tasks of a flow for triage, without closed ones or other flows', () => {
+    store.create({
+      flow: 'inbound',
+      step: 'spec',
+      ...ADDR,
+      thread_id: THREAD,
+      data: { key: 'a', title: 'Ikona', request: 'r', project: 'dev-web/x' },
+    });
+    const closed = store.create({
+      flow: 'inbound',
+      step: 'spec',
+      ...ADDR,
+      thread_id: 'slack:C0B6B8A1MEV:2.2',
+      data: { key: 'b' },
+    });
+    store.update(closed.id, { status: 'cancelled' });
+    store.create({ flow: 'other', step: 's', ...ADDR, data: { key: 'c' } });
+    store.create({ flow: 'inbound', step: 'clarify_project', ...ADDR, data: {} }); // no key yet: not listed
+    expect(store.listOpen('inbound')).toEqual([
+      {
+        key: 'a',
+        title: 'Ikona',
+        request: 'r',
+        project: 'dev-web/x',
+        step: 'spec',
+        status: 'awaiting_user',
+        thread_id: THREAD,
+      },
+    ]);
+  });
+
+  it('lists the most recently touched task first, and at most 30', () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-14T10:00:00Z'));
+    const a = store.create({ flow: 'inbound', step: 'spec', ...ADDR, data: { key: 'a' } });
+    vi.setSystemTime(new Date('2026-10-14T10:01:00Z'));
+    store.create({ flow: 'inbound', step: 'spec', ...ADDR, data: { key: 'b' } });
+    vi.setSystemTime(new Date('2026-10-14T10:02:00Z'));
+    store.update(a.id, { event: { kind: 'touched' } });
+    vi.useRealTimers();
+    expect(store.listOpen('inbound').map((t) => t.key)).toEqual(['a', 'b']);
+    for (let i = 0; i < 35; i++) store.create({ flow: 'inbound', step: 'spec', ...ADDR, data: { key: `k${i}` } });
+    for (let i = 0; i < 40; i++) store.create({ flow: 'inbound', step: 'clarify_project', ...ADDR, data: {} }); // keyless, newest
+    expect(store.listOpen('inbound')).toHaveLength(30);
+  });
+
   it('rejects an unknown status and a bad attempt', () => {
     expect(() => store.create({ flow: 'f', step: 's', ...ADDR, status: 'waiting' })).toThrow(/status must be/);
     const t = store.create({ flow: 'f', step: 's', ...ADDR });
@@ -120,6 +179,14 @@ describe('flow-task endpoints', () => {
     expect((u.json.task as { status: string }).status).toBe('approved');
     const g = await post('/flow-task/find-open', { ...ADDR, thread_id: THREAD });
     expect(g.json.task).toBeNull();
+  });
+
+  it('list-open answers the open tasks of the named flow', async () => {
+    store.create({ flow: 'inbound', step: 'spec', ...ADDR, thread_id: THREAD, data: { key: 'a' } });
+    const r = await post('/flow-task/list-open', { flow: 'inbound' });
+    expect(r.status).toBe(200);
+    expect((r.json.tasks as Array<{ key: string }>).map((t) => t.key)).toEqual(['a']);
+    expect((await post('/flow-task/list-open', {})).status).toBe(400);
   });
 
   it('answers 400 with the reason for bad input, 404 for unknown paths', async () => {
