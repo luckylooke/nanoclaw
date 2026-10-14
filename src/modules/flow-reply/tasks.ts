@@ -24,6 +24,7 @@ import { randomUUID } from 'crypto';
 import Database from 'better-sqlite3';
 
 export const TASK_STATUSES = [
+  'writing',
   'awaiting_user',
   'awaiting_agent',
   'approved',
@@ -33,7 +34,10 @@ export const TASK_STATUSES = [
   'failed',
 ] as const;
 export type TaskStatus = (typeof TASK_STATUSES)[number];
-const OPEN: TaskStatus[] = ['awaiting_user', 'awaiting_agent'];
+// 'writing': the flow took a new task and is writing its first document. Open, so a
+// reply on the thread meanwhile reaches the flow (which keeps it as a note for the
+// document) instead of falling through to an agent (2026-10-13).
+const OPEN: TaskStatus[] = ['writing', 'awaiting_user', 'awaiting_agent'];
 const MAX_DATA_BYTES = 64 * 1024;
 const MAX_HISTORY = 50;
 
@@ -326,6 +330,41 @@ export class FlowTaskStore {
       )
       .get(key, ...OPEN) as Row | undefined;
     return r ? fromRow(r) : null;
+  }
+
+  /**
+   * Open tasks of a flow, newest first, as triage sees them: enough to tell
+   * whether a new message continues one of them, nothing of the documents.
+   */
+  listOpen(
+    flow: string,
+    limit = 30,
+  ): Array<{
+    key: string;
+    title: string;
+    request: string;
+    project: string;
+    step: string;
+    status: TaskStatus;
+    thread_id: string | null;
+  }> {
+    const rows = this.db
+      .prepare(
+        // The key filter is in SQL, before LIMIT: keyless rows must not eat the cap.
+        `SELECT * FROM flow_tasks WHERE flow = ? AND status IN (${OPEN.map(() => '?').join(',')})
+            AND COALESCE(json_extract(data, '$.key'), '') != ''
+          ORDER BY updated_at DESC LIMIT ?`,
+      )
+      .all(flow, ...OPEN, limit) as Row[];
+    return rows.map(fromRow).map((t) => ({
+      key: String(t.data.key),
+      title: String(t.data.title ?? ''),
+      request: String(t.data.request ?? '').slice(0, 300),
+      project: String(t.data.project ?? ''),
+      step: t.step,
+      status: t.status,
+      thread_id: t.thread_id,
+    }));
   }
 
   /** One running job per key: a new dispatch for the same key replaces the old (a re-implementation round). */
