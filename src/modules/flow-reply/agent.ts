@@ -36,9 +36,13 @@ import type { FlowTaskStore } from './tasks.js';
 export const FLOW_AGENT_CALLBACK_URL =
   process.env.FLOW_AGENT_CALLBACK_URL || 'http://127.0.0.1:8000/process-income-msg/agent-done/fJXu7oW1cW61f/';
 export const AGENTS = ['dev-web', 'dev-game'];
-const KEY = /^[a-z0-9]{4,32}$/;
+// "<id>" or "<id>-<readable-suffix>" (agent-system stages.taskKeyFor, 2026-10-15).
+const KEY = /^[a-z0-9]{4,32}(?:-[a-z0-9]+){0,8}$/;
+const KEY_MAX = 64;
+/** The identity part of a key: markers match on it, so a typo in the readable suffix still closes the job. */
+export const keyId = (key: string) => key.toLowerCase().split('-')[0];
 const MAX_BRIEF = 20_000;
-const MARKER = /\[\[flow:(done|blocked|ask|clarified)\s+([a-z0-9]{4,32})\]\]/i;
+const MARKER = /\[\[flow:(done|blocked|ask|clarified)\s+([a-z0-9]{4,32}(?:-[a-z0-9]+)*)\]\]/i;
 
 export interface AgentChannel {
   channel_type: string;
@@ -72,7 +76,8 @@ export async function dispatch(
   const key = typeof body.key === 'string' ? body.key : '';
   const agent = typeof body.agent === 'string' ? body.agent : '';
   const text = typeof body.text === 'string' ? body.text : '';
-  if (!KEY.test(key)) throw new DispatchError('key must be 4–32 lowercase letters or digits', 400);
+  if (!KEY.test(key) || key.length > KEY_MAX)
+    throw new DispatchError('key must be 4–32 lowercase letters or digits, optionally with -suffix words', 400);
   if (!AGENTS.includes(agent)) throw new DispatchError(`agent must be one of ${AGENTS.join(', ')}`, 400);
   if (!text.trim() || text.length > MAX_BRIEF)
     throw new DispatchError(`text is required, at most ${MAX_BRIEF} characters`, 400);
@@ -176,7 +181,8 @@ export async function cancelJob(
   deps: Pick<DispatchDeps, 'store' | 'getAdapter' | 'agentChannel'>,
 ): Promise<{ cancelled: boolean; thread_id?: string }> {
   const key = typeof body.key === 'string' ? body.key : '';
-  if (!KEY.test(key)) throw new DispatchError('key must be 4–32 lowercase letters or digits', 400);
+  if (!KEY.test(key) || key.length > KEY_MAX)
+    throw new DispatchError('key must be 4–32 lowercase letters or digits, optionally with -suffix words', 400);
   const job = deps.store().getJob(key);
   if (!job || job.status !== 'running') return { cancelled: false };
   const channel = await deps.agentChannel(job.agent);
@@ -220,7 +226,7 @@ export async function onAgentMessage(
     return;
   }
   const m = MARKER.exec(text);
-  if (!m || m[2].toLowerCase() !== job.key) return;
+  if (!m || keyId(m[2]) !== keyId(job.key)) return;
   let status = m[1].toLowerCase() as 'done' | 'blocked' | 'ask' | 'clarified';
   // A clarification closes only on decisions the person has already confirmed.
   // A message that still asks ("Pokračujem?") is the summary, not the
