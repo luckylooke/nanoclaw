@@ -98,6 +98,10 @@ describe('dispatch', () => {
   it('refuses bad input before touching any channel', async () => {
     const { d, deliver } = deps();
     await expect(dispatch({ key: 'BAD KEY', agent: 'dev-web', text: 'x' }, d)).rejects.toThrow(DispatchError);
+    await expect(dispatch({ key: 'abcd1234-' + 'x'.repeat(60), agent: 'dev-web', text: 'x' }, d)).rejects.toThrow(
+      DispatchError,
+    );
+    await expect(dispatch({ key: 'abcd1234--x', agent: 'dev-web', text: 'x' }, d)).rejects.toThrow(DispatchError);
     await expect(dispatch({ key: 'abcd1234', agent: 'admin', text: 'x' }, d)).rejects.toThrow(/agent must be/);
     await expect(dispatch({ key: 'abcd1234', agent: 'dev-game', text: 'x' }, d)).rejects.toThrow(/not wired/);
     await expect(dispatch({ key: 'abcd1234', agent: 'dev-web', text: '' }, d)).rejects.toThrow(/text is required/);
@@ -149,6 +153,32 @@ describe('completion hook', () => {
       d,
     );
     expect(post).toHaveBeenCalledTimes(1);
+  });
+
+  it('a readable key closes on its id part, even when the agent mistypes the suffix', async () => {
+    const key = 'mv8fzzfcthap-ivery-odkaz-instagram';
+    store.startJob({ key, agent: 'dev-web', platform_id: 'slack:C1', thread_id: 'slack:C1:2.2' });
+    const post = vi.fn(async (_u: string, _b: unknown) => 200);
+    const d = { store: () => store, post };
+    await onAgentMessage(
+      {
+        platformId: 'slack:C1',
+        threadId: 'slack:C1:2.2',
+        content: content('[[flow:done mv8fzzfcthbb-ivery-odkaz-instagram]]'),
+      },
+      d,
+    );
+    expect(post).not.toHaveBeenCalled(); // another id: not this job
+    await onAgentMessage(
+      {
+        platformId: 'slack:C1',
+        threadId: 'slack:C1:2.2',
+        content: content('Hotovo.\n[[flow:done mv8fzzfcthap-ivery-instagram-odkaz]]'),
+      },
+      d,
+    );
+    expect(post).toHaveBeenCalledTimes(1);
+    expect(post.mock.calls[0][1]).toMatchObject({ key, status: 'done' });
   });
 
   it('a question keeps the job running; a clarification closes it', async () => {
