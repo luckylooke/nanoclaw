@@ -43,7 +43,16 @@ import { log } from '../../log.js';
 import { routeInbound } from '../../router.js';
 import { registerIsolatedThreads } from '../cross-session-context/index.js';
 import { getOwners } from '../permissions/db/user-roles.js';
-import { cancelJob, dispatch, DispatchError, onAgentMessage, type AgentChannel, type DispatchDeps } from './agent.js';
+import {
+  cancelJob,
+  dispatch,
+  DispatchError,
+  onAgentMessage,
+  sweepSilentJobs,
+  type AgentChannel,
+  type DispatchDeps,
+} from './agent.js';
+import { isMaintenance } from '../../maintenance.js';
 import { makeContinuationInterceptor } from './continuation.js';
 import { registerMessageInterceptor } from '../../router.js';
 import type { MessagingGroup } from '../../types.js';
@@ -378,6 +387,24 @@ if (!process.env.VITEST) {
   registerFlowInbound(getFlowTaskStore);
   // An agent's reply carrying [[flow:done|blocked <key>]] on a job thread calls the flow back.
   registerPostDeliveryHook((msg) => onAgentMessage(msg, { store: getFlowTaskStore, post: postJson }));
+  // The silence watch: an agent that stopped without a marker is reminded once, then the person is told.
+  const sweepDeps = {
+    store: getFlowTaskStore,
+    dispatchDeps: {
+      store: getFlowTaskStore,
+      getAdapter: getDeliveryAdapter,
+      agentChannel,
+      ownerHandle,
+      route: routeInbound,
+    },
+    maintenance: isMaintenance,
+  };
+  setInterval(
+    () => {
+      sweepSilentJobs(sweepDeps).catch((err) => log.error('Flow silence watch failed', { err: String(err) }));
+    },
+    5 * 60 * 1000,
+  ).unref();
   // A flow job's thread is one task; sibling echoes mixed two tasks on 2026-10-04.
   registerIsolatedThreads((threadId) => getFlowTaskStore().isJobThread(threadId));
   // A job thread outlives the nightly session reset: wake the agent with a pointer, not the whole thread.
