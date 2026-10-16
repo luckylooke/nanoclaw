@@ -78,6 +78,9 @@ const WATCHED = [
   // a silent change could move a class or stop proposing retirements.
   'tools/models/models.js',
   'tools/models/lib.js',
+  // The flow's daily reminder (cron 09:00): it posts in the person's task threads, and a silent change
+  // could start nagging, or stop telling him a task waits on him.
+  'tools/flowlib/remind.js',
   'tool-proxy/daemon.js',
   'tool-proxy/tool-exec.js',
   // SEC-AI2: holds the shared bearer token host-side and stamps each call's
