@@ -154,6 +154,11 @@ export class FlowTaskStore {
     if (!jobCols.includes('awaiting_confirmation')) {
       this.db.exec('ALTER TABLE flow_jobs ADD COLUMN awaiting_confirmation INTEGER NOT NULL DEFAULT 0');
     }
+    // The silence watch (agent.ts sweepSilentJobs): when the agent last wrote, whether that message carried a
+    // marker, and when the flow nudged it and told the person.
+    for (const c of ['last_agent_at', 'last_marker', 'nudged_at', 'warned_at']) {
+      if (!jobCols.includes(c)) this.db.exec(`ALTER TABLE flow_jobs ADD COLUMN ${c} TEXT`);
+    }
   }
 
   get(id: string): FlowTask | null {
@@ -374,7 +379,8 @@ export class FlowTaskStore {
       .prepare(
         `INSERT INTO flow_jobs (key, agent, platform_id, thread_id, status, created_at) VALUES (?, ?, ?, ?, 'running', ?)
          ON CONFLICT(key) DO UPDATE SET agent = excluded.agent, platform_id = excluded.platform_id, thread_id = excluded.thread_id,
-           status = 'running', created_at = excluded.created_at, finished_at = NULL, result = NULL, callback = NULL`,
+           status = 'running', created_at = excluded.created_at, finished_at = NULL, result = NULL, callback = NULL,
+           last_agent_at = NULL, last_marker = NULL, nudged_at = NULL, warned_at = NULL`,
       )
       .run(job.key, job.agent, job.platform_id, job.thread_id, now);
     return this.getJob(job.key) as FlowJob;
@@ -408,6 +414,28 @@ export class FlowTaskStore {
     this.db.prepare('UPDATE flow_jobs SET awaiting_confirmation = ? WHERE key = ?').run(on ? 1 : 0, key);
   }
 
+  /** The agent wrote on its job thread; marker is '' for a message without one. */
+  noteAgentMessage(key: string, marker: string, at: string = new Date().toISOString()): void {
+    this.db.prepare('UPDATE flow_jobs SET last_agent_at = ?, last_marker = ? WHERE key = ?').run(at, marker, key);
+  }
+
+  /** Running jobs whose agent's last message carried no marker — the candidates for the silence watch. */
+  silentCandidates(): FlowJob[] {
+    return this.db
+      .prepare(
+        "SELECT * FROM flow_jobs WHERE status = 'running' AND last_marker = '' AND last_agent_at IS NOT NULL AND warned_at IS NULL",
+      )
+      .all() as FlowJob[];
+  }
+
+  markNudged(key: string, at: string): void {
+    this.db.prepare('UPDATE flow_jobs SET nudged_at = ? WHERE key = ?').run(at, key);
+  }
+
+  markWarned(key: string, at: string): void {
+    this.db.prepare('UPDATE flow_jobs SET warned_at = ? WHERE key = ?').run(at, key);
+  }
+
   noteCallback(key: string, outcome: string): void {
     this.db.prepare('UPDATE flow_jobs SET callback = ? WHERE key = ?').run(outcome.slice(0, 500), key);
   }
@@ -428,6 +456,10 @@ export interface FlowJob {
   result: string | null;
   callback: string | null;
   awaiting_confirmation?: number;
+  last_agent_at?: string | null;
+  last_marker?: string | null;
+  nudged_at?: string | null;
+  warned_at?: string | null;
 }
 
 export const TRACE_KEEP_DAYS = 7;

@@ -27,11 +27,16 @@
  * closes a clarification job with the confirmed decisions.
  * A failed callback is recorded on the job
  * and visible via /flow-agent/job, never retried blindly.
+ *
+ * On the job thread the marker's key is optional and a wrong one is logged, not fatal: the thread
+ * already names the job (Ctibor, 2026-10-16). A message without a marker starts the silence watch
+ * (sweepSilentJobs, every 5 min from index.ts): quiet SILENT_MS after it, the agent is reminded once
+ * how to finish; quiet SILENT_MS more, the person is told in the task thread. Nothing during maintenance.
  */
 import type { InboundEvent } from '../../channels/adapter.js';
 import type { ChannelDeliveryAdapter } from '../../delivery.js';
 import { log } from '../../log.js';
-import type { FlowTaskStore } from './tasks.js';
+import type { FlowJob, FlowTaskStore } from './tasks.js';
 
 export const FLOW_AGENT_CALLBACK_URL =
   process.env.FLOW_AGENT_CALLBACK_URL || 'http://127.0.0.1:8000/process-income-msg/agent-done/fJXu7oW1cW61f/';
@@ -42,7 +47,9 @@ const KEY_MAX = 64;
 /** The identity part of a key: markers match on it, so a typo in the readable suffix still closes the job. */
 export const keyId = (key: string) => key.toLowerCase().split('-')[0];
 const MAX_BRIEF = 20_000;
-const MARKER = /\[\[flow:(done|blocked|ask|clarified)\s+([a-z0-9]{4,32}(?:-[a-z0-9]+)*)\]\]/i;
+// The key is optional and a wrong one is not fatal: the thread already names the job (Ctibor, 2026-10-16) —
+// a marker the agent mistyped would otherwise leave the task waiting for ever.
+const MARKER = /\[\[flow:(done|blocked|ask|clarified)(?:\s+([a-z0-9]{1,32}(?:-[a-z0-9]+)*))?\s*\]\]/i;
 
 export interface AgentChannel {
   channel_type: string;
@@ -205,6 +212,87 @@ export async function cancelJob(
   return { cancelled: true, thread_id: job.thread_id };
 }
 
+/**
+ * The silence watch (Ctibor, 2026-10-16): an agent whose last message on a job thread carried no marker
+ * and that has been quiet for SILENT_MS is reminded once how to finish; quiet SILENT_MS more, the person
+ * is told in the task thread. Nothing during maintenance; a question ([[flow:ask]]) is not silence.
+ */
+export const SILENT_MS = 30 * 60 * 1000;
+
+export interface SweepDeps {
+  store: () => FlowTaskStore;
+  dispatchDeps: DispatchDeps;
+  maintenance: () => boolean;
+  now?: () => number;
+}
+
+export function nudgeText(key: string): string {
+  return [
+    'Your last message here ended without a flow marker, so the flow cannot tell whether you are finished.',
+    `- Finished: send your final report and end it with exactly [[flow:done ${key}]]`,
+    `- Cannot continue: say why in two lines and end with [[flow:blocked ${key}]]`,
+    `- You need the person: ask, and end with [[flow:ask ${key}]]`,
+    'Still working: carry on, nothing to do now.',
+  ].join('\n');
+}
+
+function warnText(job: FlowJob, minutes: number, lang: string): string {
+  const m = /^slack:(C[A-Z0-9]+):(\d+)\.(\d+)$/.exec(job.thread_id);
+  const link = m ? `https://slack.com/archives/${m[1]}/p${m[2]}${m[3]}` : job.thread_id;
+  return lang === 'sk'
+    ? `⚠️ *${job.agent}* sa odmlčal bez ukončenia úlohy (pripomenul som mu to pred ${minutes} min, odvtedy ticho) — flow nevie, či je hotový. Pozri jeho vlákno: ${link}\nMôžeš mu napísať tu, pošlem mu to.`
+    : `⚠️ *${job.agent}* went quiet without finishing (reminded ${minutes} min ago, quiet since) — the flow cannot tell whether it is done. See its thread: ${link}\nYou can write to it here; I pass it on.`;
+}
+
+export async function sweepSilentJobs(deps: SweepDeps): Promise<{ nudged: string[]; warned: string[] }> {
+  const out = { nudged: [] as string[], warned: [] as string[] };
+  if (deps.maintenance()) return out;
+  const now = (deps.now || Date.now)();
+  for (const job of deps.store().silentCandidates()) {
+    const last = Date.parse(job.last_agent_at || '');
+    const nudged = job.nudged_at ? Date.parse(job.nudged_at) : 0;
+    const quietSince = Math.max(last || 0, nudged);
+    if (!(now - quietSince >= SILENT_MS)) continue;
+    if (!nudged) {
+      try {
+        await dispatch({ key: job.key, agent: job.agent, text: nudgeText(job.key), continue: true }, deps.dispatchDeps);
+        // dispatch re-opened the job (startJob clears the watch): restore what the agent last did, then stamp the nudge
+        deps.store().noteAgentMessage(job.key, '', new Date(now).toISOString());
+        deps.store().markNudged(job.key, new Date(now).toISOString());
+        out.nudged.push(job.key);
+        log.info('Flow agent job silent: nudged', { key: job.key });
+      } catch (err) {
+        // dispatch may have re-opened the job before failing: put the watch back, so the next sweep tries again
+        deps.store().noteAgentMessage(job.key, '', job.last_agent_at || new Date(now).toISOString());
+        log.error('Flow agent job silent: nudge failed', { key: job.key, err: String(err) });
+      }
+      continue;
+    }
+    if (job.warned_at) continue;
+    const task = deps.store().findOpenByKey(job.key);
+    const adapter = deps.dispatchDeps.getAdapter();
+    if (!task || !adapter) continue;
+    const lang = (task.data as { person_lang?: string }).person_lang === 'sk' ? 'sk' : 'en';
+    try {
+      await adapter.deliver(
+        task.channel_type,
+        task.platform_id,
+        task.thread_id,
+        'chat',
+        JSON.stringify({ text: warnText(job, Math.round((now - nudged) / 60000), lang) }),
+        undefined,
+        task.instance ?? undefined,
+      );
+      deps.store().markWarned(job.key, new Date(now).toISOString());
+      out.warned.push(job.key);
+      log.info('Flow agent job silent: person told', { key: job.key });
+    } catch (err) {
+      log.error('Flow agent job silent: telling the person failed', { key: job.key, err: String(err) });
+    }
+  }
+  return out;
+}
+
 export interface CompletionDeps {
   store: () => FlowTaskStore;
   post: (url: string, body: unknown) => Promise<number>;
@@ -226,7 +314,13 @@ export async function onAgentMessage(
     return;
   }
   const m = MARKER.exec(text);
-  if (!m || keyId(m[2]) !== keyId(job.key)) return;
+  if (!m) {
+    deps.store().noteAgentMessage(job.key, ''); // progress, or a report that forgot its marker: the silence watch decides
+    return;
+  }
+  if (m[2] && keyId(m[2]) !== keyId(job.key))
+    log.warn('Flow marker names another key; taken for the job on this thread', { job: job.key, marker: m[2] });
+  deps.store().noteAgentMessage(job.key, m[1].toLowerCase());
   let status = m[1].toLowerCase() as 'done' | 'blocked' | 'ask' | 'clarified';
   // A clarification closes only on decisions the person has already confirmed.
   // A message that still asks ("Pokračujem?") is the summary, not the
