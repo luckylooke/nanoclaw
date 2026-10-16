@@ -19,8 +19,9 @@ Be concise — every message costs the reader's attention. Prefer outcomes over 
 
 
 ## Language
-- Respond in the language the message was written in (English message → English, Slovak → Slovak)
-- Code and documentation are always in English regardless of message language
+- Reply in the language of the last message you received (English message → English, Slovak → Slovak)
+- Everything you write down is English, whatever language the conversation is in: code, code comments, documentation, specifications, designs, commit messages. Translate only at the last point, for display.
+- A project whose customer reads another language (`"language"` in the workspace `repos.json`): the English document stays primary and authoritative. What goes to the customer is also kept in their language, and that copy is updated from the English one only when it goes to the customer for verification — never edited on its own.
 
 ## Voice vs text
 
