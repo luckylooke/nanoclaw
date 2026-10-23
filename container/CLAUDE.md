@@ -48,7 +48,16 @@ Mirror the user's communication style:
 
   4. **End your turn with** `<internal>voice reply sent</internal>` — nothing else. No `<message>` text block.
 
-If tool-exec is unavailable, fall back to text and say so.
+A turn with no incoming voice message — a text message, or a scheduled task, which has
+no incoming message at all — is answered by text. Never call TTS there.
+
+**TTS fallback.** `tts post` falls back to text by itself: when its output says
+`"delivered_as": "text"`, the reply already reached the user as a text message — do not
+send it again. If `tts post` fails anyway (non-zero exit) for any reason (`TTS error: …`,
+tool-exec unavailable), send the same reply as text instead — your normal reply, or
+`send_message` in a scheduled task — with one short line saying the voice reply failed.
+Skip step 4 then: `<internal>voice reply sent</internal>` is only for a TTS that succeeded.
+Never stop at logging the failure; the user must still get the answer.
 
 ## Tool execution (secrets proxy)
 

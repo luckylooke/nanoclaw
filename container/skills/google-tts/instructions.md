@@ -22,4 +22,5 @@ node /workspace/extra/tool-exec.js tts post "text to speak" <channel_id> <thread
 - Voice is en-US-Chirp3-HD-Puck — handles English and Slovak well.
 - For the personal-assistant agent in #agent-personal, the channel ID is C0B6D0QNSUU.
 - Keep TTS replies short (under 200 words) — audio is slower to consume than text.
-- Only use TTS when the user explicitly asks for a voice reply, or when spoken confirmation fits better than a text block.
+- Only use TTS to answer a voice message, or when the user explicitly asks for a voice reply. Everything else — text messages, scheduled tasks — is text.
+- If `tts post` fails, send the same reply as text and say in one line that voice failed. A failed TTS must never mean no reply.
