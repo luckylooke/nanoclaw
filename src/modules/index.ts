@@ -31,3 +31,5 @@ import './community-portal/index.js';
 // Flow reply: lets a Total.js Flow process answer on the channel a message came
 // from, through the registered channel adapter, without holding a token.
 import './flow-reply/index.js';
+// Host events: inbound reactions to host tools via data/events/hooks.json (fork stand-in for an upstream event API).
+import './host-events/index.js';

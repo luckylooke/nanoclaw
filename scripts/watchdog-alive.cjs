@@ -81,6 +81,10 @@ const WATCHED = [
   // The flow's daily reminder (cron 09:00): it posts in the person's task threads, and a silent change
   // could start nagging, or stop telling him a task waits on him.
   'tools/flowlib/remind.js',
+  // The study planner (cron every 15 min, and run by the nanoclaw host-events reaction
+  // hook): it holds the Slack token and writes to the agents' calendar.
+  'tools/study/study.js',
+  'tools/study/lib.js',
   'tool-proxy/daemon.js',
   'tool-proxy/tool-exec.js',
   // SEC-AI2: holds the shared bearer token host-side and stamps each call's
