@@ -33,3 +33,5 @@ import './community-portal/index.js';
 import './flow-reply/index.js';
 // Host events: inbound reactions to host tools via data/events/hooks.json (fork stand-in for an upstream event API).
 import './host-events/index.js';
+// Fork features on the seams in src/ext/seams.ts. EXT-SEAM
+import '../ext/index.js';

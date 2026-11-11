@@ -25,7 +25,8 @@ import {
   OTEL_COLLECTOR_PORT,
   TIMEZONE,
 } from './config.js';
-import { CONTAINER_PLUGINS_DIR, CONTAINER_TOOL_PROXY_SOCK_DIR, materializeContainerJson } from './container-config.js';
+import { CONTAINER_PLUGINS_DIR, materializeContainerJson } from './container-config.js';
+import { contributedSpawnMounts } from './ext/seams.js'; // EXT-SEAM
 import { classifyComplexity, tuningForTier, DEFAULT_STATIC_WINDOW } from './complexity-tier.js';
 import { getContainerConfig } from './db/container-configs.js';
 import { updateContainerConfigScalars } from './db/container-configs.js';
@@ -1252,18 +1253,8 @@ export async function buildMounts(
     scope,
   });
 
-  // SEC-AI2: this group's tool-proxy socket, and no other group's. Reaching the
-  // socket is what authenticates the caller, so the group is proven by the mount
-  // rather than claimed in the request body — which is what it was before, only
-  // shape-validated, while AGENT_GROUP is passed into every tool and scopes
-  // `memory` audiences. Mount the DIRECTORY, not the socket file: a front-end
-  // restart recreates the socket with a new inode, and a file-level bind mount
-  // would keep pointing at the deleted one. Read-write because a client must be
-  // able to connect(); the socket grants nothing beyond the tool-proxy API.
-  const toolProxySockDir = path.join(process.env.HOME || '', 'tool-proxy-sockets', agentGroup.folder);
-  if (process.env.HOME && fs.existsSync(toolProxySockDir)) {
-    mounts.push({ hostPath: toolProxySockDir, containerPath: CONTAINER_TOOL_PROXY_SOCK_DIR, readonly: false });
-  }
+  // EXT-SEAM: spawn mounts (src/ext/seams.ts) — the tool-proxy socket.
+  mounts.push(...contributedSpawnMounts({ agentGroup, session, groupDir }));
 
   // Host-side privileged code, nested RO on top of the RW group mount.
   //
