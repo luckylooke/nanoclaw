@@ -31,6 +31,8 @@ import { registerReactionHandler } from '../../response-registry.js';
 import type { InboundReaction } from '../../channels/adapter.js';
 import { isMember } from '../permissions/db/agent-group-members.js';
 import { hasAdminPrivilege } from '../permissions/db/user-roles.js';
+// Writes the agent_messages index that reactions are attributed against.
+import './reply-index.js';
 
 // Emoji → signal. Matched against BOTH the normalized name (e.g. `thumbsup`)
 // and the raw platform emoji (e.g. `+1`), case-insensitively.

@@ -10,11 +10,6 @@
  * slow tick (remote mailbox, many sessions) neither serializes every
  * session's latency nor adds a full interval of dead time after it.
  */
-import { createHash } from 'crypto';
-import { existsSync, readFileSync } from 'fs';
-import { join } from 'path';
-
-import { GROUPS_DIR } from './config.js';
 import {
   getRunningSessions,
   getActiveSessions,
@@ -35,7 +30,6 @@ import { runGuarded, type DeliveryGuardSpec, type GuardedDeliveryHandler } from 
 import { isUnguarded, type Unguarded } from './guard/index.js';
 import { mapConcurrent } from './concurrency.js';
 import { fanOutboundMessage } from './modules/cross-session-context/index.js';
-import { recordAgentMessage } from './gateway-db.js';
 import { log } from './log.js';
 import { normalizeOptions } from './channels/ask-question.js';
 import { clearOutbox, readOutboxFiles, withExistingMailboxSession } from './session-manager.js';
@@ -328,7 +322,7 @@ async function drainSession(session: Session): Promise<void> {
           );
           for (const hook of postDeliveryHooks) {
             try {
-              await hook(msg, session, { firstDelivery });
+              await hook(msg, session, { firstDelivery, platformMsgId: platformMsgId ?? null }); // EXT-SEAM
             } catch (err) {
               log.warn('Post-delivery hook failed', { messageId: msg.id, sessionId: session.id, err });
             }
@@ -557,97 +551,9 @@ async function deliverMessage(
     fileCount: files?.length,
   });
 
-  // T1.3 — index this reply so a later reaction can attribute back to the
-  // group/session and seed eval candidates. Only real user-facing text
-  // replies (a returned platform id + non-empty text); edits, reactions,
-  // cards and ask_question cards are skipped. Best-effort — never blocks
-  // the delivery path (marking delivered must still happen).
-  if (platformMsgId && msg.channelType && msg.platformId) {
-    try {
-      await recordReplyForFeedback(platformMsgId, msg, content, session);
-    } catch (err) {
-      log.warn('Feedback index: recordReply failed', { id: msg.id, err: String(err) });
-    }
-  }
-
   clearOutbox(session.agent_group_id, session.id, msg.id);
 
   return platformMsgId;
-}
-
-/** Best-effort text extraction from an inbound/outbound content JSON object. */
-function extractText(content: unknown): string | null {
-  if (!content || typeof content !== 'object') return null;
-  const c = content as Record<string, unknown>;
-  for (const key of ['markdown', 'text', 'content']) {
-    if (typeof c[key] === 'string' && (c[key] as string).length > 0) return c[key] as string;
-  }
-  return null;
-}
-
-/**
- * Record a delivered agent reply into the gateway feedback index (T1.3).
- * `content` is the already-parsed outbound message. Skips non-text payloads
- * (edits/reactions/cards) so only genuine agent answers are indexed.
- */
-async function recordReplyForFeedback(
-  platformMsgId: string,
-  msg: { channelType: string | null; platformId: string | null; inReplyTo: string | null },
-  content: Record<string, unknown>,
-  session: Session,
-): Promise<void> {
-  if (content.operation === 'edit' || content.operation === 'reaction') return;
-  if (content.type === 'ask_question' || content.type === 'card') return;
-  const outputText = extractText(content);
-  if (!outputText) return; // files-only / empty — nothing worth capturing
-
-  // The triggering user turn, if this reply carries an inReplyTo link. Read
-  // through the mailbox seam — the caller holds no session on this key.
-  let inputText: string | null = null;
-  const inReplyTo = msg.inReplyTo;
-  if (inReplyTo) {
-    try {
-      const raw = await withExistingMailboxSession(session.agent_group_id, session.id, (mailbox) =>
-        mailbox.getInboundContentById(inReplyTo),
-      );
-      inputText = raw ? extractText(JSON.parse(raw)) : null;
-    } catch {
-      inputText = null;
-    }
-  }
-
-  const group = await getAgentGroup(session.agent_group_id);
-  recordAgentMessage({
-    channel_type: msg.channelType,
-    platform_id: msg.platformId,
-    message_ts: platformMsgId,
-    group_slug: group?.folder ?? null,
-    session_id: session.id,
-    prompt_version: computePromptVersion(group?.folder ?? null),
-    input_text: inputText,
-    output_text: outputText,
-  });
-}
-
-/**
- * T7 prompt_version: a stable fingerprint of the agent's identity at reply time,
- * so a downvote (T1.3) can be tied to a concrete prompt and joined to an eval
- * snapshot. sha256(CLAUDE.md + '\n' + CLAUDE.local.md).slice(0,16). Kept
- * byte-identical to tools/eval/eval.js computeIdentityVersion() (which reads the
- * same GROUPS_DIR files) so eval `identity_version` == feedback `prompt_version`.
- * Tracks the CLAUDE.md structure + per-group CLAUDE.local (the self-mod surface);
- * not shared-fragment content. Best-effort — never throws into delivery.
- */
-function computePromptVersion(folder: string | null): string | null {
-  if (!folder) return null;
-  try {
-    const base = join(GROUPS_DIR, folder);
-    const readIf = (p: string): string => (existsSync(p) ? readFileSync(p, 'utf8') : '');
-    const material = readIf(join(base, 'CLAUDE.md')) + '\n' + readIf(join(base, 'CLAUDE.local.md'));
-    return createHash('sha256').update(material).digest('hex').slice(0, 16);
-  } catch {
-    return null;
-  }
 }
 
 /**
@@ -671,6 +577,8 @@ export interface PostDeliveryInfo {
    * fires for); the hook only ever observes user-facing rows.
    */
   firstDelivery: boolean;
+  /** Platform id of the delivered message (Slack ts), null when the adapter returned none. */
+  platformMsgId: string | null; // EXT-SEAM: reply index (modules/feedback/reply-index.ts)
 }
 
 export type PostDeliveryHook = (msg: OutboundMessage, session: Session, info: PostDeliveryInfo) => void | Promise<void>;
