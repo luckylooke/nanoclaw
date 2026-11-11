@@ -27,6 +27,7 @@ import { getContainerConfig } from './db/container-configs.js';
 import { readGroupPersona } from './group-persona.js';
 import { log } from './log.js';
 import type { AgentGroup } from './types.js';
+import { contributedPromptFragments } from './ext/seams.js'; // EXT-SEAM
 
 /** One `# <name>` block of the composed document. */
 interface ProjectDocSection {
@@ -219,6 +220,7 @@ export async function composeGroupProjectDoc(
     });
   }
 
+  for (const f of contributedPromptFragments()) push(f.name, f.body); // EXT-SEAM: prompt fragments (src/ext/seams.ts)
   for (const section of spec.extraSections ?? []) push(section.name, section.body);
 
   const nativeSkills = renderNativeSkillsSection(spec.instructions);

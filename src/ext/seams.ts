@@ -186,10 +186,48 @@ export async function contributedSpawnTuning(ctx: SpawnTuningContext): Promise<R
   return out;
 }
 
+// ── Prompt fragments ───────────────────────────────────────────────────────
+// Sections composed into every group's project document (CLAUDE.md) right
+// after upstream's base document, in registration order. Read at compose time,
+// i.e. on every spawn, so an edit applies to the next turn. Never droppable by
+// the size cap: these carry policy (secrets isolation), not reference material.
+
+export interface PromptFragment {
+  /** Section heading in the composed document. */
+  name: string;
+  /** The section body, or null to contribute nothing this time. */
+  body: () => string | null;
+}
+
+const promptFragments: PromptFragment[] = [];
+
+export function registerPromptFragment(fragment: PromptFragment): void {
+  promptFragments.push(fragment);
+}
+
+/**
+ * Every registered fragment with a body. A fragment whose read throws is
+ * logged and skipped, matching how the composer tolerates a missing base
+ * document: a spawn with a fragment missing is better than no spawn.
+ */
+export function contributedPromptFragments(): { name: string; body: string }[] {
+  const out: { name: string; body: string }[] = [];
+  for (const f of promptFragments) {
+    try {
+      const body = f.body();
+      if (body && body.trim()) out.push({ name: f.name, body });
+    } catch (err) {
+      log.error('Prompt fragment failed — composed without it', { fragment: f.name, err });
+    }
+  }
+  return out;
+}
+
 /** Test helper: drop every registration. */
 export function _resetSeamsForTest(): void {
   wakeGates.length = 0;
   webhookMiddleware.length = 0;
   spawnMounts.length = 0;
   spawnTuning.length = 0;
+  promptFragments.length = 0;
 }
