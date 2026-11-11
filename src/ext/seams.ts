@@ -139,9 +139,57 @@ export function contributedSpawnMounts(ctx: SpawnMountContext): VolumeMount[] {
   });
 }
 
+// ── Spawn tuning ───────────────────────────────────────────────────────────
+// Per-spawn values computed from THIS session at spawn time: extra container env
+// and overrides for container.json. The gateway provider handles everything
+// static (credentials, egress, telemetry) but is given a SessionKey, not the
+// group or the inbound text, so it cannot carry these.
+
+export interface SpawnTuningContext {
+  agentGroup: AgentGroup;
+  session: Session;
+}
+
+export interface SpawnTuning {
+  env?: Record<string, string>;
+  /** Applied by materializeContainerJson only where the group has no explicit pin. */
+  overrides?: { effort?: string };
+}
+
+export type SpawnTuningContribution = (ctx: SpawnTuningContext) => SpawnTuning | Promise<SpawnTuning>;
+
+const spawnTuning: { name: string; fn: SpawnTuningContribution }[] = [];
+
+export function registerSpawnTuning(name: string, fn: SpawnTuningContribution): void {
+  spawnTuning.push({ name, fn });
+}
+
+/**
+ * Merged tuning of every contribution: env merges in registration order (later
+ * wins), the first contribution to set an override keeps it. A throwing
+ * contribution is skipped and logged — tuning is an optimisation, and a spawn
+ * without it runs on the group's static config, which is what it did before.
+ */
+export async function contributedSpawnTuning(ctx: SpawnTuningContext): Promise<Required<SpawnTuning>> {
+  const out: Required<SpawnTuning> = { env: {}, overrides: {} };
+  for (const { name, fn } of spawnTuning) {
+    let t: SpawnTuning;
+    try {
+      t = await fn(ctx);
+    } catch (err) {
+      log.warn('Spawn tuning contribution failed — skipped', { contribution: name, sessionId: ctx.session.id, err });
+      continue;
+    }
+    Object.assign(out.env, t.env ?? {});
+    if (t.overrides?.effort && !out.overrides.effort) out.overrides.effort = t.overrides.effort;
+  }
+  return out;
+}
+
 /** Test helper: drop every registration. */
 export function _resetSeamsForTest(): void {
   wakeGates.length = 0;
   webhookMiddleware.length = 0;
   spawnMounts.length = 0;
+  spawnTuning.length = 0;
 }

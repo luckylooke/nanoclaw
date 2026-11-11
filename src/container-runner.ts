@@ -22,12 +22,10 @@ import {
   DATA_DIR,
   GROUPS_DIR,
   INSTALL_SLUG,
-  OTEL_COLLECTOR_PORT,
   TIMEZONE,
 } from './config.js';
 import { CONTAINER_PLUGINS_DIR, materializeContainerJson } from './container-config.js';
-import { contributedSpawnMounts } from './ext/seams.js'; // EXT-SEAM
-import { classifyComplexity, tuningForTier, DEFAULT_STATIC_WINDOW } from './complexity-tier.js';
+import { contributedSpawnMounts, contributedSpawnTuning } from './ext/seams.js'; // EXT-SEAM
 import { getContainerConfig } from './db/container-configs.js';
 import { updateContainerConfigScalars } from './db/container-configs.js';
 import { CONTAINER_RUNTIME_BIN } from './container-runtime.js';
@@ -90,11 +88,10 @@ import {
   markContainerStopped,
   sessionContextPath,
   sessionDir,
-  withExistingMailboxSession,
   writeSessionContext,
   writeSessionRouting,
 } from './session-manager.js';
-import type { AgentGroup, ContainerConfigRow, Session } from './types.js';
+import type { AgentGroup, Session } from './types.js';
 
 /**
  * Docker defaults /dev/shm to 64m, which silently short-writes past that size.
@@ -379,13 +376,12 @@ async function spawnContainer(session: Session): Promise<void> {
   const mailbox = getAgentMailbox();
   writeSessionContext(agentGroup.id, session.id, await mailbox.runnerContext(mailboxKey));
 
-  const configRow = await getContainerConfig(agentGroup.id);
-  const { compactWindow, effortOverride } = await resolveAdaptiveTuning(agentGroup.id, session.id, configRow);
+  const spawnTuning = await contributedSpawnTuning({ agentGroup, session }); // EXT-SEAM: spawn tuning (src/ext/seams.ts)
 
   // Materialize container.json from DB — writes fresh file and returns
   // the config object, threaded through provider resolution, buildMounts,
   // and buildContainerArgs so we don't re-read.
-  const containerConfig = await materializeContainerJson(agentGroup.id, { effort: effortOverride });
+  const containerConfig = await materializeContainerJson(agentGroup.id, spawnTuning.overrides); // EXT-SEAM
 
   const providerName = resolveProviderName(session.agent_provider, containerConfig.provider);
   await initGroupFilesystem(agentGroup, { provider: providerName });
@@ -438,9 +434,7 @@ async function spawnContainer(session: Session): Promise<void> {
       contribution,
       gateway,
       mailboxEnvironment,
-      // Adaptive per-spawn tuning: the tier for THIS message maps to a compact
-      // window. Delivered as env because the runner reads it at startup.
-      forkEnv: { CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(compactWindow) },
+      forkEnv: spawnTuning.env, // EXT-SEAM
     });
 
     log.info('Spawning session', { sessionId: session.id, agentGroup: agentGroup.name, containerName });
@@ -510,35 +504,6 @@ async function spawnContainer(session: Session): Promise<void> {
       await runtime.finishedPromise;
     },
   });
-}
-
-/**
- * Adaptive per-spawn tuning: read the session's latest trigger message and
- * classify it into a complexity tier, mapping to a compact-window + effort
- * pair. Falls back to the DB-configured compact_window (or the static
- * default) when there's no inbound text signal to classify. See
- * complexity-tier.ts.
- *
- * Reads through the mailbox seam: upstream v2.3.0 replaced the direct
- * openInboundDb() handle with MailboxSession, so the trigger-text read is a
- * mailbox method rather than a SQL query issued from here.
- */
-async function resolveAdaptiveTuning(
-  agentGroupId: string,
-  sessionId: string,
-  configRow: ContainerConfigRow | undefined,
-): Promise<{ compactWindow: number; effortOverride?: string }> {
-  let text: string | null | undefined;
-  try {
-    text = await withExistingMailboxSession(agentGroupId, sessionId, (mailbox) => mailbox.getLatestTriggerText());
-  } catch (err) {
-    log.debug('Adaptive tuning: failed to read inbound text', { sessionId, err });
-  }
-  if (!text || text.trim().length === 0) {
-    return { compactWindow: configRow?.compact_window ?? DEFAULT_STATIC_WINDOW };
-  }
-  const tuning = tuningForTier(classifyComplexity(text));
-  return { compactWindow: tuning.window, effortOverride: tuning.effort };
 }
 
 /**
@@ -1293,15 +1258,7 @@ export interface ComposeSessionSpecInput {
   session: Session;
   containerName: string;
   mounts: VolumeMount[];
-  /**
-   * Fork-only per-session env that no other seam can carry. The gateway provider
-   * handles everything static (credentials, egress, telemetry); this is for
-   * values computed HERE from this turn's message — today just the adaptive
-   * compact window from `complexity-tier.ts`, which the provider cannot see
-   * because contribute() is given a SessionKey, not the inbound text.
-   * See spec/fork-features.yaml, feature `complexity-tier`.
-   */
-  forkEnv?: Record<string, string>;
+  forkEnv?: Record<string, string>; // EXT-SEAM: env from spawn tuning (src/ext/seams.ts)
   containerConfig: import('./container-config.js').ContainerConfig;
   contribution: ProviderContainerContribution;
   /**
@@ -1339,7 +1296,7 @@ export function composeSessionSpec(input: ComposeSessionSpecInput): SessionSpec 
   const env: Record<string, string> = {
     TZ: containerConfig.timezone ?? TIMEZONE,
     ...mailboxEnvironment,
-    ...(input.forkEnv ?? {}),
+    ...(input.forkEnv ?? {}), // EXT-SEAM
   };
   // The contributed lane (ContainerSpec.contributedEnv): registry-sourced env,
   // exempt from the credential-NAME check and still refused credential VALUES.

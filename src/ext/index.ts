@@ -7,3 +7,4 @@ import './webhook-rate-limit.js';
 import './tool-proxy-socket.js';
 // After the socket: same mount order as when both were inline in buildMounts.
 import './ro-host-code-mounts.js';
+import './adaptive-tuning.js';
