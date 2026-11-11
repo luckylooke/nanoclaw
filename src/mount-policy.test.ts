@@ -3,7 +3,7 @@ import os from 'os';
 import path from 'path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import { escapableRoMounts, privilegedRepoMounts } from './container-runner.js';
+import { escapableRoMounts, privilegedRepoMounts } from './ext/ro-host-code-mounts.js';
 
 /**
  * The Orchestrator's group dir is the one that is a real directory rather than a
