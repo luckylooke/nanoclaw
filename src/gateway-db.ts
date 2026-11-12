@@ -165,6 +165,7 @@ export function initGatewayDb(): void {
       );
       CREATE INDEX IF NOT EXISTS idx_api_calls_ts ON api_calls(ts);
       CREATE INDEX IF NOT EXISTS idx_api_calls_group ON api_calls(group_slug);
+      CREATE INDEX IF NOT EXISTS idx_api_calls_trace ON api_calls(trace_id);
 
       -- T1.3 outbound index: one row per delivered agent chat reply, keyed by
       -- the platform message id (Slack ts). Carries the (input, output) pair so
@@ -589,6 +590,41 @@ export function recordAgentMessage(row: AgentMessageInput): void {
     });
   } catch (err) {
     log.warn('Gateway: recordAgentMessage failed', { err: String(err) });
+  }
+}
+
+export interface TraceUsage {
+  calls: number;
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  eur: number;
+}
+
+/**
+ * What one trace cost one group, optionally only calls after `since` (ISO).
+ * The usage footer prices a turn with it. Null when the gateway is not open
+ * or the read fails.
+ */
+export function traceUsage(traceId: string, groupSlug: string, since: string | null): TraceUsage | null {
+  if (!_gw) return null;
+  try {
+    return _gw
+      .prepare(
+        `SELECT count(*) AS calls,
+                coalesce(sum(input_tokens), 0) AS input,
+                coalesce(sum(output_tokens), 0) AS output,
+                coalesce(sum(cache_read_tokens), 0) AS cacheRead,
+                coalesce(sum(cache_creation_tokens), 0) AS cacheWrite,
+                coalesce(sum(cost_eur), 0) AS eur
+           FROM api_calls
+          WHERE trace_id = ? AND group_slug = ? AND (? IS NULL OR ts > ?)`,
+      )
+      .get(traceId, groupSlug, since, since) as TraceUsage;
+  } catch (err) {
+    log.warn('Gateway: traceUsage failed', { err: String(err) });
+    return null;
   }
 }
 

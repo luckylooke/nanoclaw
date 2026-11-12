@@ -30,6 +30,7 @@ import {
   type RoutingContext,
 } from './formatter.js';
 import { stripHarnessTagArtifacts } from './harness-tag-strip.js';
+import { turnEnded } from './ext/seams.js'; // EXT-SEAM
 import { isUploadTraceCommand, uploadTrace } from './upload-trace.js';
 import type { AgentProvider, AgentQuery, ProviderEvent, ProviderExchange } from './providers/types.js';
 import type { ProviderRuntimeContract } from './provider-contracts/registry.js';
@@ -686,6 +687,7 @@ export async function processQuery(
         // genuinely re-sending the same body still delivers. The assembly
         // buffer dies with the turn: a fragment that never closed is not
         // carried into the next turn — the wrap-nudge owns that case.
+        await turnEnded({ routing, delivered: midTurnSent > 0 || chatRowWrittenSince(turnStartSeq) }); // EXT-SEAM
         midTurnSent = 0;
         turnStartSeq = maxOutboundSeq();
         midTurnTail = '';
@@ -1060,7 +1062,7 @@ export async function dispatchResultText(
   text: string,
   routing: RoutingContext,
   options?: ResultDispatchOptions,
-): Promise<{ sent: number; hasUnwrapped: boolean; taskBlocks: TaskMessageBlock[]; slackDests: DestinationEntry[] }> {
+): Promise<{ sent: number; hasUnwrapped: boolean; taskBlocks: TaskMessageBlock[] }> {
   // <internal> spans are not-for-delivery scratchpad. Remove them BEFORE block
   // extraction so a <message> drafted inside one is never delivered from the
   // final text either — the mid-turn seam already guarantees this; without the
@@ -1080,7 +1082,6 @@ export async function dispatchResultText(
   const taskBlocks: TaskMessageBlock[] = [];
   let lastIndex = 0;
   const scratchpadParts: string[] = [];
-  const slackDests: DestinationEntry[] = [];
 
   while ((match = MESSAGE_RE.exec(text)) !== null) {
     if (match.index > lastIndex) {
@@ -1136,7 +1137,6 @@ export async function dispatchResultText(
     }
     await sendToDestination(dest, body, routing);
     sent++;
-    if (dest.type === 'channel') slackDests.push(dest);
   }
   if (lastIndex < text.length) {
     scratchpadParts.push(text.slice(lastIndex));
@@ -1158,7 +1158,7 @@ export async function dispatchResultText(
   if (hasUnwrapped) {
     log(`WARNING: agent output had no <message to="..."> blocks — nothing was sent`);
   }
-  return { sent, hasUnwrapped, taskBlocks, slackDests };
+  return { sent, hasUnwrapped, taskBlocks };
 }
 
 /**

@@ -9,3 +9,4 @@ import './tool-proxy-socket.js';
 import './ro-host-code-mounts.js';
 import './adaptive-tuning.js';
 import './prompt-fragments.js';
+import './usage-footer.js';

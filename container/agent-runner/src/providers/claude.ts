@@ -1,11 +1,7 @@
-import crypto from 'crypto';
-import fs from 'fs';
-import os from 'os';
-import path from 'path';
-
 import { query as sdkQuery, type HookCallback, type PreCompactHookInput } from '@anthropic-ai/claude-agent-sdk';
 
 import { clearContainerToolInFlight, setContainerToolInFlight } from '../db/container-state.js';
+import { contributedQuery, withContributedHooks } from '../ext/seams.js'; // EXT-SEAM
 import type { MemorySessionHookRegistration } from '../memory/session-hook.js';
 import type { ResolvedRuntimeConfiguration } from '../provider-contracts/registry.js';
 // The execution-policy, inference, MCP, and memory derivations live in
@@ -23,7 +19,6 @@ import {
 // Transcript archiving and rotation are this provider's own concern: both
 // read the SDK's on-disk .jsonl, which no other provider has.
 import { archiveClaudeTranscript, rotateClaudeContinuation } from './claude-history.js';
-import { createReviewGate } from './review-gate.js';
 import { registerProvider } from './provider-registry.js';
 import type { AgentProvider, AgentQuery, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
 
@@ -214,44 +209,6 @@ const CLAUDE_CODE_AUTO_COMPACT_WINDOW = process.env.CLAUDE_CODE_AUTO_COMPACT_WIN
  */
 const STALE_SESSION_RE = /no conversation found|ENOENT.*\.jsonl|session.*not found/i;
 
-// ── Per-turn tracing ──
-//
-// One trace id per query() — i.e. per agent turn — shared by two channels so
-// the cost row and the execution detail describe the same unit of work:
-//
-//   1. `x-trace-id` appended to ANTHROPIC_CUSTOM_HEADERS. Claude Code attaches
-//      it to every Anthropic request; the credential proxy reads it into
-//      gateway.db `api_calls.trace_id` and strips it before forwarding upstream.
-//   2. `TRACEPARENT` (W3C). In Agent SDK / headless mode Claude Code adopts an
-//      inbound trace context as the parent of its own interaction span, so the
-//      OTel spans it exports carry this same trace id.
-//
-// The id is therefore deliberately in OTel's wire format (32 lowercase hex) so
-// `api_calls.trace_id` joins `otel.db spans.trace_id` with no translation.
-function newTraceId(): string {
-  return crypto.randomBytes(16).toString('hex');
-}
-function newSpanId(): string {
-  return crypto.randomBytes(8).toString('hex');
-}
-
-/**
- * Merge the per-turn trace id into the env handed to this query's Claude Code
- * process. `ANTHROPIC_CUSTOM_HEADERS` already carries `x-agent-group` from the
- * container launcher (docker -e); we must preserve it — Claude Code reads the
- * variable whole, so replacing it would silently drop per-agent cost
- * attribution and un-cap the budget for that agent.
- */
-function traceEnv(traceId: string): Record<string, string> {
-  const existing = process.env.ANTHROPIC_CUSTOM_HEADERS?.trim();
-  const headerLines = existing ? [existing] : [];
-  headerLines.push(`x-trace-id: ${traceId}`);
-  return {
-    ANTHROPIC_CUSTOM_HEADERS: headerLines.join('\n'),
-    TRACEPARENT: `00-${traceId}-${newSpanId()}-01`,
-  };
-}
-
 export class ClaudeProvider implements AgentProvider {
   private assistantName?: string;
   private mcp: ReturnType<typeof resolveClaudeMcpServers>;
@@ -311,14 +268,7 @@ export class ClaudeProvider implements AgentProvider {
 
     const instructions = input.systemContext?.instructions;
 
-    // One trace id per turn, logged so a container log line can be tied back to
-    // the gateway row and the OTel spans for the same turn.
-    const traceId = newTraceId();
-    log(`trace ${traceId}`);
-
-    // The review board's deterministic gate (spec/review-board.md step F): one
-    // instance per turn, observes PostToolUse, blocks a premature Stop once.
-    const reviewGate = createReviewGate({ agentDir: '/workspace/agent' });
+    const ext = contributedQuery(); // EXT-SEAM: per-query env and hooks (ext/seams.ts)
 
     const sdkResult = sdkQuery({
       prompt: stream,
@@ -342,7 +292,7 @@ export class ClaudeProvider implements AgentProvider {
         // Streaming deltas are the liveness signal for that window; translateEvents
         // turns them into throttled `activity` and nothing else.
         includePartialMessages: true,
-        env: { ...this.env, ...traceEnv(traceId) },
+        env: { ...this.env, ...ext.env }, // EXT-SEAM
         model: this.inference.model,
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         effort: this.inference.effort as any,
@@ -355,13 +305,13 @@ export class ClaudeProvider implements AgentProvider {
         // than query options, which is why they ride `settings`.
         settings: { ...this.inference.settings, ...this.executionPolicy.settings },
         mcpServers: this.mcp.mcpServers,
-        hooks: {
+        // EXT-SEAM: contributed hooks join core's (ext/seams.ts)
+        hooks: withContributedHooks(ext, {
           PreToolUse: [{ hooks: [preToolUseHook] }],
-          PostToolUse: [{ hooks: [postToolUseHook, reviewGate.postToolUse as HookCallback] }],
+          PostToolUse: [{ hooks: [postToolUseHook] }],
           PostToolUseFailure: [{ hooks: [postToolUseHook] }],
           PreCompact: [{ hooks: [createPreCompactHook(this.assistantName)] }],
-          Stop: [{ hooks: [reviewGate.stop as HookCallback] }],
-        },
+        }), // EXT-SEAM
       },
     });
 
