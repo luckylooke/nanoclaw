@@ -37,9 +37,23 @@ describe('prompt-fragment seam', () => {
       },
     });
     registerPromptFragment({ name: 'B', body: () => 'b' });
-    expect(contributedPromptFragments()).toEqual([
-      { name: 'A', body: 'a' },
-      { name: 'B', body: 'b' },
+    expect(contributedPromptFragments({ groupDir: '/g' }, 'after-base')).toEqual([
+      { name: 'A', body: 'a', droppable: false },
+      { name: 'B', body: 'b', droppable: false },
     ]);
+  });
+
+  it('serves each placement its own fragments, with the group directory and droppability', () => {
+    registerPromptFragment({ name: 'Head', body: () => 'h' });
+    registerPromptFragment({
+      name: 'Tail',
+      placement: 'tail',
+      droppable: true,
+      body: ({ groupDir }) => `in ${groupDir}`,
+    });
+    expect(contributedPromptFragments({ groupDir: '/g' }, 'tail')).toEqual([
+      { name: 'Tail', body: 'in /g', droppable: true },
+    ]);
+    expect(contributedPromptFragments({ groupDir: '/g' }, 'after-base').map((f) => f.name)).toEqual(['Head']);
   });
 });

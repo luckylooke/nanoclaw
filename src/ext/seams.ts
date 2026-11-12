@@ -187,16 +187,30 @@ export async function contributedSpawnTuning(ctx: SpawnTuningContext): Promise<R
 }
 
 // ── Prompt fragments ───────────────────────────────────────────────────────
-// Sections composed into every group's project document (CLAUDE.md) right
-// after upstream's base document, in registration order. Read at compose time,
-// i.e. on every spawn, so an edit applies to the next turn. Never droppable by
-// the size cap: these carry policy (secrets isolation), not reference material.
+// Sections composed into every group's project document (CLAUDE.md), in
+// registration order, at one of two places. Read at compose time, i.e. on every
+// spawn, so an edit applies to the next turn.
+//   - 'after-base' (default): right after upstream's base document. Policy
+//     (secrets isolation), so never droppable by the size cap.
+//   - 'tail': after every other section. For per-group text that changes far
+//     more often than the rest: prompt caching is a prefix match, so the
+//     volatile part goes last.
+
+export type PromptFragmentPlacement = 'after-base' | 'tail';
+
+export interface PromptFragmentContext {
+  /** The group's directory on the host, which the container can write to. */
+  groupDir: string;
+}
 
 export interface PromptFragment {
   /** Section heading in the composed document. */
   name: string;
   /** The section body, or null to contribute nothing this time. */
-  body: () => string | null;
+  body: (ctx: PromptFragmentContext) => string | null;
+  placement?: PromptFragmentPlacement;
+  /** Evicted by the size cap before the core sections. Default false. */
+  droppable?: boolean;
 }
 
 const promptFragments: PromptFragment[] = [];
@@ -206,16 +220,20 @@ export function registerPromptFragment(fragment: PromptFragment): void {
 }
 
 /**
- * Every registered fragment with a body. A fragment whose read throws is
- * logged and skipped, matching how the composer tolerates a missing base
- * document: a spawn with a fragment missing is better than no spawn.
+ * Every registered fragment for `placement` that has a body. A fragment whose
+ * read throws is logged and skipped, matching how the composer tolerates a
+ * missing base document: a spawn with a fragment missing is better than no spawn.
  */
-export function contributedPromptFragments(): { name: string; body: string }[] {
-  const out: { name: string; body: string }[] = [];
+export function contributedPromptFragments(
+  ctx: PromptFragmentContext,
+  placement: PromptFragmentPlacement,
+): { name: string; body: string; droppable: boolean }[] {
+  const out: { name: string; body: string; droppable: boolean }[] = [];
   for (const f of promptFragments) {
+    if ((f.placement ?? 'after-base') !== placement) continue;
     try {
-      const body = f.body();
-      if (body && body.trim()) out.push({ name: f.name, body });
+      const body = f.body(ctx);
+      if (body && body.trim()) out.push({ name: f.name, body, droppable: f.droppable ?? false });
     } catch (err) {
       log.error('Prompt fragment failed — composed without it', { fragment: f.name, err });
     }
