@@ -16,6 +16,7 @@
  */
 import type http from 'http';
 
+import type { InboundReaction } from '../channels/adapter.js';
 import { log } from '../log.js';
 import type { VolumeMount } from '../providers/provider-container-registry.js';
 import type { AgentGroup, Session } from '../types.js';
@@ -241,6 +242,63 @@ export function contributedPromptFragments(
   return out;
 }
 
+// ── Host pre-start ──────────────────────────────────────────────────────────
+// Services that must be up before anything can spawn or talk to a container:
+// main() runs these after the DB is ready and before the channel adapters,
+// adoption of running containers and the sweep. Upstream's onHostStart runs
+// after all three, which is too late for e.g. the credential proxy every
+// agent's ANTHROPIC_BASE_URL points at. A failure aborts startup, like a failed
+// onHostStart: a host that cannot serve its agents must not pretend to.
+// Stopping goes through upstream's onHostShutdown.
+
+const hostPreStart: { name: string; start: () => Promise<void> }[] = [];
+
+export function registerHostPreStart(name: string, start: () => Promise<void>): void {
+  hostPreStart.push({ name, start });
+}
+
+export async function runHostPreStart(): Promise<void> {
+  for (const s of hostPreStart) {
+    try {
+      await s.start();
+    } catch (err) {
+      log.error('Host pre-start failed', { service: s.name, err });
+      throw err;
+    }
+  }
+}
+
+// ── Reaction handlers ───────────────────────────────────────────────────────
+// Inbound emoji reactions (ChannelSetup.onReaction, which the fork adds to the
+// channel adapter contract). main() hands every reaction to dispatchReaction;
+// every registered handler sees it. Upstream has no reaction path at all.
+
+export type ReactionHandler = (reaction: InboundReaction) => void | Promise<void>;
+
+const reactionHandlers: ReactionHandler[] = [];
+
+export function registerReactionHandler(handler: ReactionHandler): void {
+  reactionHandlers.push(handler);
+}
+
+/** Every handler in turn; one throwing is logged and the rest still run. */
+export async function runReactionHandlers(reaction: InboundReaction): Promise<void> {
+  for (const handler of reactionHandlers) {
+    try {
+      await handler(reaction);
+    } catch (err) {
+      log.error('Reaction handler threw', { messageTs: reaction.messageTs, err });
+    }
+  }
+}
+
+/** Fire-and-forget entry for ChannelSetup.onReaction: never throws, logs what fails. */
+export function dispatchReaction(reaction: InboundReaction): void {
+  runReactionHandlers(reaction).catch((err) => {
+    log.error('Failed to handle reaction', { messageTs: reaction.messageTs, err });
+  });
+}
+
 /** Test helper: drop every registration. */
 export function _resetSeamsForTest(): void {
   wakeGates.length = 0;
@@ -248,4 +306,6 @@ export function _resetSeamsForTest(): void {
   spawnMounts.length = 0;
   spawnTuning.length = 0;
   promptFragments.length = 0;
+  hostPreStart.length = 0;
+  reactionHandlers.length = 0;
 }

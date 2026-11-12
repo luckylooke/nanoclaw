@@ -35,7 +35,7 @@ import path from 'path';
 
 import { DATA_DIR } from '../../config.js';
 import { log } from '../../log.js';
-import { registerReactionHandler } from '../../response-registry.js';
+import { registerReactionHandler } from '../../ext/seams.js';
 import type { InboundReaction } from '../../channels/adapter.js';
 
 export const EVENTS_DIR = path.join(DATA_DIR, 'events');

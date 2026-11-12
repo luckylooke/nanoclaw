@@ -18,7 +18,11 @@ vi.mock('../session-manager.js', () => ({ writeOutboundDirect }));
 import {
   _resetSeamsForTest,
   contributedSpawnMounts,
+  registerHostPreStart,
+  registerReactionHandler,
   registerSpawnMounts,
+  runHostPreStart,
+  runReactionHandlers,
   registerWakeGate,
   registerWebhookMiddleware,
   wakeHeld,
@@ -159,5 +163,39 @@ describe('spawn mounts + tool-proxy socket', () => {
     } finally {
       fs.rmSync(home, { recursive: true, force: true });
     }
+  });
+});
+
+describe('host pre-start', () => {
+  it('runs services in registration order and aborts startup when one fails', async () => {
+    const ran: string[] = [];
+    registerHostPreStart('a', async () => void ran.push('a'));
+    registerHostPreStart('broken', async () => {
+      throw new Error('EADDRINUSE');
+    });
+    registerHostPreStart('c', async () => void ran.push('c'));
+    await expect(runHostPreStart()).rejects.toThrow('EADDRINUSE');
+    expect(ran).toEqual(['a']);
+  });
+});
+
+describe('reaction handlers', () => {
+  it('hands each reaction to every handler; one throwing does not stop the rest or reject', async () => {
+    const seen: string[] = [];
+    registerReactionHandler(() => {
+      throw new Error('boom');
+    });
+    registerReactionHandler(async (r) => void seen.push(`${r.messageTs}:${r.emoji}`));
+    await expect(
+      runReactionHandlers({
+        channelType: 'slack',
+        channel: 'slack:C1',
+        messageTs: '1.2',
+        emoji: 'thumbsup',
+        rawEmoji: '+1',
+        userId: 'U1',
+      }),
+    ).resolves.toBeUndefined();
+    expect(seen).toEqual(['1.2:thumbsup']);
   });
 });

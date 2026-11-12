@@ -4,28 +4,14 @@ const state = vi.hoisted(() => ({
   adopted: false,
   approvalReady: false,
   releaseAdoption: undefined as (() => void) | undefined,
-  proxyListening: false,
+  preStart: vi.fn(), // EXT-SEAM
   routeInbound: vi.fn(),
   startChannels: vi.fn(),
   ready: vi.fn(),
 }));
 vi.mock('./backfill-container-configs.js', () => ({ backfillContainerConfigs: vi.fn() }));
-// Fork: main() also reads the credential-proxy bind address and starts the proxy before the adapters.
-vi.mock('./config.js', () => ({
-  CENTRAL_DB_PATH: ':memory:',
-  DATA_DIR: '/tmp',
-  CREDENTIAL_PROXY_PORT: 0,
-  CREDENTIAL_PROXY_HOST: '127.0.0.1',
-}));
-// It must be listening before anything that can spawn a container — the
-// adapters and the sweep — or a first message would launch an agent whose
-// ANTHROPIC_BASE_URL points at nothing.
-vi.mock('./credential-proxy.js', () => ({
-  startCredentialProxy: async () => {
-    state.proxyListening = true;
-    return { close: vi.fn() };
-  },
-}));
+vi.mock('./config.js', () => ({ CENTRAL_DB_PATH: ':memory:' }));
+vi.mock('./ext/seams.js', () => ({ runHostPreStart: state.preStart, dispatchReaction: vi.fn() })); // EXT-SEAM
 vi.mock('./circuit-breaker.js', () => ({ enforceStartupBackoff: vi.fn(), resetCircuitBreaker: vi.fn() }));
 vi.mock('./upgrade-state.js', () => ({ enforceUpgradeTripwire: vi.fn() }));
 vi.mock('./db/connection.js', () => ({ initDb: async () => ({ dialect: 'sqlite' }), closeDb: vi.fn() }));
@@ -92,7 +78,7 @@ it('finishes adoption before a channel can route its first inbound message', asy
     expect(state.adopted).toBe(true);
   });
   state.startChannels.mockImplementation(async (setup) => {
-    expect(state.proxyListening).toBe(true);
+    expect(state.preStart).toHaveBeenCalled(); // EXT-SEAM
     setup({ channelType: 'fixture' }).onInbound('chat', null, {
       id: 'message',
       kind: 'text',

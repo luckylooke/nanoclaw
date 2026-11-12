@@ -27,7 +27,7 @@ import { GROUPS_DIR } from '../../config.js';
 import { getAgentGroupByFolder } from '../../db/agent-groups.js';
 import { lookupAgentMessage, recordFeedback } from '../../gateway-db.js';
 import { log } from '../../log.js';
-import { registerReactionHandler } from '../../response-registry.js';
+import { registerReactionHandler } from '../../ext/seams.js';
 import type { InboundReaction } from '../../channels/adapter.js';
 import { isMember } from '../permissions/db/agent-group-members.js';
 import { hasAdminPrivilege } from '../permissions/db/user-roles.js';

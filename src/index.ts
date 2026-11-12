@@ -5,10 +5,7 @@
  * start delivery polls, start sweep, handle shutdown.
  */
 import { backfillContainerConfigs } from './backfill-container-configs.js';
-import { CENTRAL_DB_PATH, DATA_DIR, CREDENTIAL_PROXY_PORT, CREDENTIAL_PROXY_HOST } from './config.js';
-import { type Server } from 'http';
-import { startCredentialProxy } from './credential-proxy.js';
-import path from 'path';
+import { CENTRAL_DB_PATH } from './config.js';
 import { enforceStartupBackoff, resetCircuitBreaker } from './circuit-breaker.js';
 import {
   abortGatewaySessionObservers,
@@ -29,21 +26,13 @@ import { getGatewayProvider } from './gateway-providers/index.js';
 import { routeInbound } from './router.js';
 import { log } from './log.js';
 import { enforceUpgradeTripwire } from './upgrade-state.js';
+import { dispatchReaction, runHostPreStart } from './ext/seams.js'; // EXT-SEAM
 
 // Response registry lives in response-registry.ts to break the
 // circular import cycle: src/index.ts imports src/modules/index.js for side
 // effects, and the modules call registerResponseHandler at top level — which
-// would hit a TDZ error if the arrays lived here. Re-exported here so existing
-// callers see the same surface.
-import {
-  getResponseHandlers,
-  type ResponsePayload,
-  registerResponseHandler,
-  getReactionHandlers,
-  type ResponseHandler,
-} from './response-registry.js';
-export { registerResponseHandler };
-export type { ResponsePayload, ResponseHandler };
+// would hit a TDZ error if the array lived here.
+import { getResponseHandlers, type ResponsePayload } from './response-registry.js';
 
 const hostAbortController = new AbortController();
 
@@ -57,16 +46,6 @@ async function dispatchResponse(payload: ResponsePayload): Promise<void> {
     }
   }
   log.warn('Unclaimed response', { questionId: payload.questionId, value: payload.value });
-}
-
-async function dispatchReaction(reaction: InboundReaction): Promise<void> {
-  for (const handler of getReactionHandlers()) {
-    try {
-      await handler(reaction);
-    } catch (err) {
-      log.error('Reaction handler threw', { messageTs: reaction.messageTs, err });
-    }
-  }
 }
 
 // Channel barrel — each enabled channel self-registers on import.
@@ -83,7 +62,7 @@ import './cli/commands/index.js';
 import './cli/delivery-action.js';
 import { startCliServer, stopCliServer } from './cli/socket-server.js';
 
-import type { ChannelAdapter, ChannelSetup, InboundReaction } from './channels/adapter.js';
+import type { ChannelAdapter, ChannelSetup } from './channels/adapter.js';
 import {
   initChannelAdapters,
   teardownChannelAdapters,
@@ -91,8 +70,6 @@ import {
 } from './channels/channel-registry.js';
 
 let stopGatewayAvailabilityMonitor: (() => void) | undefined;
-// Native credential proxy server handle — closed on graceful shutdown.
-let credentialProxyServer: Server | undefined;
 
 async function main(): Promise<void> {
   log.info('NanoClaw starting');
@@ -125,13 +102,8 @@ async function main(): Promise<void> {
     releaseInbound = resolve;
   });
 
-  // 2b. Native credential proxy — injects the real Anthropic credential on
-  // the wire so per-agent containers never see it. Must be listening before
-  // any container spawns (channel adapters / sweep can trigger a spawn).
-  // Replaces the OneCLI gateway.
-  credentialProxyServer = await startCredentialProxy(CREDENTIAL_PROXY_PORT, CREDENTIAL_PROXY_HOST);
-
-  // 3. Channel adapters
+  await runHostPreStart(); // EXT-SEAM: fork services that must run before anything can spawn (src/ext/seams.ts)
+  // 2. Channel adapters
   await initChannelAdapters((adapter: ChannelAdapter): ChannelSetup => {
     return {
       onInbound(platformId, threadId, message) {
@@ -191,11 +163,7 @@ async function main(): Promise<void> {
           log.error('Failed to handle question response', { questionId, err });
         });
       },
-      onReaction(reaction) {
-        dispatchReaction(reaction).catch((err) => {
-          log.error('Failed to handle reaction', { messageTs: reaction.messageTs, err });
-        });
-      },
+      onReaction: dispatchReaction, // EXT-SEAM
     };
   });
 
@@ -251,7 +219,6 @@ async function shutdown(signal: string): Promise<void> {
   await stopHostInstanceLease();
   stopDeliveryPolls();
   stopHostSweep();
-  credentialProxyServer?.close();
   await stopCliServer();
   try {
     await teardownChannelAdapters();
