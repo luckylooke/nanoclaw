@@ -22,3 +22,4 @@ beforeEach(async () => {
   await import('./mailbox/compose.js');
   (await import('./gateway-providers/index.js')).resetGatewayProvider(gateway);
 });
+process.umask(0o022); // EXT-SEAM: tests expect 644/755 modes; the VPS shell umask is 002
