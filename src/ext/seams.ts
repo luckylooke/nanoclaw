@@ -17,6 +17,7 @@
 import type http from 'http';
 
 import type { InboundReaction } from '../channels/adapter.js';
+import type { CustomOperation, ResourceDef } from '../cli/crud.js';
 import { log } from '../log.js';
 import type { VolumeMount } from '../providers/provider-container-registry.js';
 import type { AgentGroup, Session } from '../types.js';
@@ -299,8 +300,29 @@ export function dispatchReaction(reaction: InboundReaction): void {
   });
 }
 
+// ── CLI resource verbs ──────────────────────────────────────────────────────
+// Extra `ncl <resource> <verb>` operations on an upstream resource, without
+// editing its resources/*.ts. registerResource (src/cli/crud.ts) merges them
+// into the definition before registering, so help, strict arg validation and
+// approval access treat them exactly like the resource's own verbs. Register
+// at import time: src/ext/index.ts loads before the CLI resources barrel.
+
+const resourceVerbs = new Map<string, Record<string, CustomOperation>>();
+
+export function registerResourceVerb(plural: string, verb: string, op: CustomOperation): void {
+  resourceVerbs.set(plural, { ...resourceVerbs.get(plural), [verb]: op });
+}
+
+/** `def` with the contributed verbs added; a resource's own verb of the same name wins. */
+export function withContributedVerbs(def: ResourceDef): ResourceDef {
+  const extra = resourceVerbs.get(def.plural);
+  if (!extra) return def;
+  return { ...def, customOperations: { ...extra, ...def.customOperations } };
+}
+
 /** Test helper: drop every registration. */
 export function _resetSeamsForTest(): void {
+  resourceVerbs.clear();
   wakeGates.length = 0;
   webhookMiddleware.length = 0;
   spawnMounts.length = 0;

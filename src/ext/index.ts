@@ -12,3 +12,4 @@ import './adaptive-tuning.js';
 import './prompt-fragments.js';
 import './memory-index.js';
 import './usage-footer.js';
+import './group-skills-verb.js';

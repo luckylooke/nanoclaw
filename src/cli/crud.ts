@@ -15,6 +15,7 @@ import { renderVerbHelp } from './help-render.js';
 import { register } from './registry.js';
 import type { Access } from './registry.js';
 import type { CallerContext } from './frame.js';
+import { withContributedVerbs } from '../ext/seams.js'; // EXT-SEAM
 
 // ---------------------------------------------------------------------------
 // Types
@@ -446,6 +447,7 @@ export function validateArgs(
 // ---------------------------------------------------------------------------
 
 export function registerResource(def: ResourceDef): void {
+  def = withContributedVerbs(def); // EXT-SEAM: fork verbs on upstream resources (src/ext/seams.ts)
   resources.set(def.plural, def);
 
   if (def.operations.list) {
